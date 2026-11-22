@@ -1,0 +1,38 @@
+{
+	"admin/network/mesh": {
+		"title": "Mesh",
+		"order": 65,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-meshd" ] }
+	},
+	"admin/network/mesh/overview": {
+		"title": "Overview",
+		"order": 10,
+		"action": { "type": "view", "path": "meshd/overview" }
+	},
+	"admin/network/mesh/nodes": {
+		"title": "Nodes",
+		"order": 20,
+		"action": { "type": "view", "path": "meshd/nodes" }
+	},
+	"admin/network/mesh/roaming": {
+		"title": "Roaming and Wireless",
+		"order": 30,
+		"action": { "type": "view", "path": "meshd/roaming" }
+	},
+	"admin/network/mesh/policies": {
+		"title": "Policies",
+		"order": 40,
+		"action": { "type": "view", "path": "meshd/policies" }
+	},
+	"admin/network/mesh/upgrade": {
+		"title": "Upgrade",
+		"order": 50,
+		"action": { "type": "view", "path": "meshd/upgrade" }
+	},
+	"admin/network/mesh/diagnostics": {
+		"title": "Diagnostics",
+		"order": 60,
+		"action": { "type": "view", "path": "meshd/diagnostics" }
+	}
+}

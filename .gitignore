@@ -1,0 +1,12 @@
+.build-cache/
+/dist/
+/tests/test_protocol
+__pycache__/
+*.pyc
+*.ipk
+*.apk
+*.crt
+*.key
+*.csr
+*.srl
+/pki/

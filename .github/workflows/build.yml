@@ -1,0 +1,58 @@
+name: OpenWrt package build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Static checks and host tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Check shell, JavaScript and JSON syntax
+        shell: bash
+        run: |
+          bash -n scripts/build-sdk.sh
+          sh -n scripts/pki.sh
+          sh -n package/meshd/files/meshd.init
+          sh -n package/meshd/files/meshd.defaults
+          shopt -s globstar
+          for js in luci-app-meshd/htdocs/**/*.js; do node --check "$js"; done
+          python3 -m json.tool luci-app-meshd/root/usr/share/luci/menu.d/luci-app-meshd.json >/dev/null
+          python3 -m json.tool luci-app-meshd/root/usr/share/rpcd/acl.d/luci-app-meshd.json >/dev/null
+      - run: python3 -m unittest discover -s tests -v
+      - run: make -C tests test
+      - run: node luci-app-meshd/tests/smoke.cjs
+
+  sdk:
+    name: OpenWrt 24.10.5 x86/64 SDK
+    runs-on: ubuntu-24.04
+    needs: check
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install SDK host dependencies (runner only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential binutils curl file gawk gettext git libncurses-dev \
+            patch perl pkgconf python3 rsync unzip wget zlib1g-dev zstd
+      - name: Verify official SDK and build both IPKs
+        run: bash scripts/build-sdk.sh
+      - name: Upload build-check packages (not firmware)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: openwrt-24.10.5-x86-64-ipk
+          path: .build-cache/ipk/*.ipk
+          include-hidden-files: true # Only the explicitly selected IPKs under .build-cache/.
+          if-no-files-found: error
