@@ -14,14 +14,16 @@ VIEW_ROOT = LUCI / "htdocs/luci-static/resources/view"
 VIEWS = VIEW_ROOT / "wifiroam"
 COMMON = LUCI / "htdocs/luci-static/resources/wifiroam/common.js"
 
-# The 23 methods published by wifiroamd.uc api_obj (3411-4022) and granted by ACL.
+# The 31 methods published by wifiroamd.uc api_obj and granted by ACL.
 READ = {
     "status", "topology", "client_detail", "get_roam", "precheck", "discover",
     "roam_log", "get_backhaul", "appctl_status", "offload_status", "get_wifi", "get_guest",
+    "device_history", "ban_list",
 }
 WRITE = {
     "set_alias", "set_role", "set_roam", "set_backhaul", "pair", "unpair",
     "set_appctl", "set_app_policy", "set_offload", "set_wifi", "set_guest",
+    "set_pin", "ungroup_device", "wake", "set_ban", "ban_set", "ban_del",
 }
 ALL_METHODS = READ | WRITE
 

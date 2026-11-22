@@ -49,7 +49,10 @@ const GUEST_DEFAULT_SSID = "Guest";
 const GUEST_SEC_PREFIX = "wifiroam_guest_";
 const GUEST_NFT_TABLE = "wifiroam_guest";
 // 协议/行为版本：LuCI 侧要求一致，不一致时「重启」会自动 stop+start 修复
-const DAEMON_VERSION = 3;
+const DAEMON_VERSION = 5;
+// v5 additions: device history / timed ban / WoL
+const DEVICES_MAX = 512;
+const BAN_NFT_FILE = "/tmp/wifiroam-ban.nft";
 
 const ROAM_KEYS = [
 	"ieee80211r", "mobility_domain", "ft_over_ds", "ft_psk_generate_local",
@@ -205,7 +208,12 @@ let state = {
 	brdev: "br-lan",
 	peers: {},          // macnorm -> AP peer (hello + report merged)
 	discovered: {},     // macnorm -> unconfigured device seen
-	aliases: { ver: 0, map: {} },
+	aliases: { ver: 0, map: {}, groups: {}, redirect: {}, isolated: {}, pin: {} },
+	device_index: {},   // 原始 MAC -> 组 ID（由 device_reindex 重建）
+	devices: {},        // 终端历史：key -> {mac,ip,hostname,first_seen,last_online,last_offline,online,ap,conn}
+	dev_dirty: false, dev_saved: 0,
+	ban: { enabled: false, list: [], sig: "", active: {} },
+	bcast: "255.255.255.255",
 	link: null,         // SAP: outgoing channel to CAP {sock,chan,authed}
 	cap_learned: null,  // CAP ip learned from hello
 	events: [],         // ring buffer
@@ -400,9 +408,14 @@ function alias_load() {
 		let data = json(fs.readfile(ALIAS_PATH));
 		if (type(data) == "object") {
 			state.aliases.map = data.map ?? {};
+			state.aliases.groups = data.groups ?? {};
+			state.aliases.redirect = data.redirect ?? {};
+			state.aliases.isolated = data.isolated ?? {};
+			state.aliases.pin = data.pin ?? {};
 			if ((data.ver ?? 0) > state.aliases.ver)
 				state.aliases.ver = data.ver;
 		}
+		device_reindex();
 	} catch (e) { /* first boot */ }
 }
 
@@ -446,6 +459,333 @@ function alias_broadcast() {
 		}
 	}
 }
+
+// ==================================================================== v5 additions
+// 设备分组 / 历史 / 定时断网 / 固定AP / WoL：从 Node v5 守护进程移植到 ucode。
+// 目标：功能真实可用；device_key 默认退化为 MAC（无自动分组），分组在
+// device_group_refresh 中按 aliases.groups 显式维护。
+
+// 插入排序（带比较回调）：避免依赖 ucode sort() 是否接受比较器
+function sort_by(arr, cmp) {
+	let out = [];
+	for (let x in arr) {
+		let pos = length(out);
+		for (let i = 0; i < length(out); i++) {
+			if (cmp(x, out[i]) < 0) { pos = i; break; }
+		}
+		let next = [];
+		for (let j = 0; j < pos; j++) push(next, out[j]);
+		push(next, x);
+		for (let j = pos; j < length(out); j++) push(next, out[j]);
+		out = next;
+	}
+	return out;
+}
+function devnorm(v) {
+	if (type(v) == "string" && length(v) == 13 && substr(v, 0, 1) == "g")
+		return lc(v);
+	return macnorm(v);
+}
+function mac_is_random(mn) {
+	return length(mn) == 12 && index([ "2", "6", "a", "e" ], substr(mn, 1, 1)) >= 0;
+}
+function device_key(v) {
+	let mn = devnorm(v);
+	if (mn == "") return "";
+	return state.device_index[mn] ?? mn;
+}
+function device_reindex() {
+	state.device_index = {};
+	for (let gid, g in (state.aliases.groups ?? {})) {
+		for (let mn in (g.members ?? {})) state.device_index[mn] = gid;
+	}
+	for (let old, nw in (state.aliases.redirect ?? {})) {
+		for (let mn, gid in state.device_index)
+			if (gid == old) state.device_index[mn] = nw;
+	}
+}
+function device_members_of(v) {
+	let key = device_key(v);
+	let g = state.aliases.groups?.[key];
+	if (g && type(g.members) == "object") return sort(keys(g.members));
+	if (length(key) == 12 || (length(key) == 13 && substr(key, 0, 1) == "g")) return [ key ];
+	return [];
+}
+function device_alias_of(v) {
+	let key = device_key(v);
+	let al = state.aliases.map[key];
+	if (al && al.name != null && al.name != "") return { name: al.name, icon: al.icon, note: al.note };
+	for (let m in device_members_of(v)) {
+		let a = state.aliases.map[m];
+		if (a && a.name != null && a.name != "") return { name: a.name, icon: a.icon, note: a.note };
+	}
+	return {};
+}
+function pin_of(v) {
+	let key = device_key(v);
+	return state.aliases.pin?.[key] ?? "";
+}
+function pin_apply(mac, ap) {
+	let key = device_key(mac);
+	if (!(length(key) == 12 || (length(key) == 13 && substr(key, 0, 1) == "g")))
+		return { ok: false, error: "invalid_mac" };
+	ap = trim(ap ?? "");
+	if (ap != "") {
+		let amn = macnorm(ap);
+		if (length(amn) != 12) return { ok: false, error: "invalid_ap" };
+		let selfmn = macnorm(state.self.mac);
+		if (amn != selfmn && !state.peers[amn]) return { ok: false, error: "unknown_ap" };
+		ap = amn;
+	}
+	if (!state.aliases.pin) state.aliases.pin = {};
+	if (ap == "") delete state.aliases.pin[key];
+	else state.aliases.pin[key] = ap;
+	state.aliases.ver = time();
+	alias_save();
+	return { ok: true, mac: key, ap: ap };
+}
+function device_ungroup(mac) {
+	let mn = macnorm(mac);
+	if (length(mn) != 12) return { ok: false, error: "invalid_mac" };
+	let old = device_key(mn);
+	let g = state.aliases.groups?.[old];
+	if (!g || !g.members || !g.members[mn])
+		return { ok: false, error: "not_found" };
+	delete g.members[mn];
+	state.aliases.isolated[mn] = true;
+	state.device_index[mn] = mn;
+	if (!keys(g.members).length) delete state.aliases.groups[old];
+	state.aliases.ver = time();
+	alias_save();
+	alias_broadcast();
+	return { ok: true, id: mn, mac: maccolon(mn), isolated: true };
+}
+
+// --- device history (devlist) ---
+function DEVICES_PATH() { return ALIAS_DIR + "/devices.json"; }
+function devlist_load() {
+	try {
+		let data = json(fs.readfile(DEVICES_PATH()));
+		if (type(data) == "object") {
+			state.devices = data.devices ?? {};
+			for (let k, it in state.devices) it.online = false;
+		}
+	} catch (e) { /* first boot */ }
+}
+function devlist_save(force) {
+	if (!state.dev_dirty) return;
+	if (!force && time() - state.dev_saved < 60) return;
+	state.dev_saved = time();
+	state.dev_dirty = false;
+	try { fs.writefile(DEVICES_PATH(), sprintf("%.J", { ver: 1, devices: state.devices })); }
+	catch (e) { state.dev_dirty = true; }
+}
+function devlist_tick() {
+	if (state.cfg.role == "unconfigured") return;
+	let live = {};
+	let local = local_clients();
+	for (let mn, c in local) {
+		let key = device_key(mn);
+		live[key] = { mn: mn, c: c, ap: state.self.name };
+	}
+	for (let pmn, p in state.peers) {
+		if (!p.authed) continue;
+		for (let mn, c in (p.clients ?? {})) {
+			let key = device_key(mn);
+			if (!live[key] || (c.rssi ?? -999) > (live[key].c.rssi ?? -999))
+				live[key] = { mn: mn, c: c, ap: p.info?.name ?? p.name ?? pmn };
+		}
+	}
+	for (let key, e in live) {
+		let it = state.devices[key] ?? { first_seen: time() };
+		it.mac = e.mn; it.ip = e.c.ip ?? it.ip ?? null;
+		it.hostname = e.c.hostname ?? it.hostname ?? null;
+		it.ap = e.ap; it.conn = e.c.type ?? null;
+		it.last_online = time(); it.online = true;
+		state.devices[key] = it;
+	}
+	for (let key, it in state.devices) {
+		if (live[key]) continue;
+		if (it.online) { it.online = false; it.last_offline = time(); state.dev_dirty = true; }
+	}
+	let cnt = length(keys(state.devices));
+	if (cnt > 512) {
+		let off = [];
+		for (let k, it in state.devices) if (!it.online) push(off, { k: k, t: it.last_online ?? 0 });
+		off = sort_by(off, function(a, b) { return a.t - b.t; });
+		for (let i = 0; i < cnt - 512 && i < length(off); i++) {
+			delete state.devices[off[i].k]; state.dev_dirty = true;
+		}
+	}
+	devlist_save(false);
+}
+function devlist_view() {
+	devlist_tick();
+	let devs = [];
+	for (let key, it in state.devices) {
+		let members = device_members_of(key);
+		let al = state.aliases.map[key] ?? {};
+		let pin = pin_of(key);
+		let pin_name = "";
+		if (pin != "") pin_name = (pin == macnorm(state.self.mac)) ? state.self.name :
+			(state.peers[pin]?.info?.name ?? state.peers[pin]?.name ?? pin);
+		push(devs, {
+			id: key, mac: it.mac ?? key, members: members,
+			grouped: length(members) > 1,
+			name: al.name ?? "", custom_name: al.name ?? "",
+			hostname: it.hostname ?? "", ip: it.ip ?? "",
+			online: !!it.online, first_seen: it.first_seen ?? 0,
+			last_online: it.last_online ?? 0, last_offline: it.last_offline ?? 0,
+			ap: it.ap ?? "", ap_name: it.ap ?? "", conn: it.conn ?? null,
+			icon: al.icon ?? null, note: al.note ?? null,
+			isolated: !!state.aliases.isolated?.[key],
+			pin: pin, pin_name: pin_name,
+			can_wake: !it.online,
+		});
+	}
+	devs = sort_by(devs, function(a, b) {
+		if (a.online != b.online) return a.online ? -1 : 1;
+		return (b.last_online ?? 0) - (a.last_online ?? 0);
+	});
+	let aps = [ { id: macnorm(state.self.mac), name: state.self.name } ];
+	for (let pmn, p in state.peers)
+		push(aps, { id: pmn, name: p.info?.name ?? p.name ?? pmn });
+	aps = sort_by(aps, function(a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+	return { now: time(), devices: devs, aps: aps };
+}
+
+// --- WoL ---
+function wol_send(mn) {
+	let sock = socket.create(socket.AF_INET, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK, 0);
+	if (!sock) return 0;
+	sock.setopt(socket.SOL_SOCKET, socket.SO_BROADCAST, true);
+	let hexval = { a: 10, b: 11, c: 12, d: 13, e: 14, f: 15 };
+	let nib = function(c) { return (int(c) >= 0 && int(c) <= 9) ? int(c) : (hexval[c] ?? 0); };
+	let pkt = "";
+	for (let i = 0; i < 6; i++) pkt += sprintf("%c", 255);
+	for (let i = 0; i < 6; i++) {
+		let hi = substr(mn, i * 2, 1), lo = substr(mn, i * 2 + 1, 1);
+		pkt += sprintf("%c", nib(hi) * 16 + nib(lo));
+	}
+	let sent = 0;
+	let tgt = [ "255.255.255.255" ];
+	if (state.bcast && state.bcast != "255.255.255.255") push(tgt, state.bcast);
+	for (let addr in tgt) {
+		for (let port in [ 9, 7 ]) {
+			try { sock.send(pkt, 0, { address: addr, port: port }); sent++; }
+			catch (e) { /* ignore */ }
+		}
+	}
+	sock.close();
+	return sent;
+}
+
+// --- timed ban ---
+function ban_hm_str(mins) {
+	return sprintf("%02d:%02d", int(mins / 60), mins % 60);
+}
+function ban_weekdays(v) {
+	let s = type(v) == "array" ? join(" ", v) : (v ?? "");
+	let out = [];
+	for (let i = 0; i < length(s); i++) {
+		let d = int(substr(s, i, 1));
+		if (d >= 1 && d <= 7 && index(out, d) < 0) push(out, d);
+	}
+	return sort(out);
+}
+function ban_read() {
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	let leases = parse_leases();
+	let out = [];
+	cur.foreach("wifiroam", "ban", function(s) {
+		let key = device_key(s.mac ?? "");
+		if (!(length(key) == 12 || (length(key) == 13 && substr(key, 0, 1) == "g"))) return;
+		let on = hhmm_minutes(s.timeon) ?? hhmm_minutes("22:00");
+		let off = hhmm_minutes(s.timeoff) ?? hhmm_minutes("07:00");
+		let days = ban_weekdays(s.weekdays);
+		if (!length(days)) days = [ 1, 2, 3, 4, 5, 6, 7 ];
+		let name = s.name ?? "";
+		if (name == "") name = device_alias_of(key).name ?? "";
+		if (name == "") {
+			let m = device_members_of(key);
+			if (length(m)) name = leases[m[0]]?.hostname ?? "";
+		}
+		push(out, { mac: key, name: name, timeon: ban_hm_str(on), timeoff: ban_hm_str(off), weekdays: days });
+	});
+	state.ban.list = out;
+	return out;
+}
+function ban_localtime() {
+	let s = trim(cmd_output("date +%w\\ %H\\ %M"));
+	let f = split(s, " ");
+	return { wday: int(f[0] ?? 0), hour: int(f[1] ?? 0), min: int(f[2] ?? 0) };
+}
+function ban_in_window(b, lt, nowmin) {
+	if (!length(b.weekdays)) return false;
+	let wd = lt.wday == 0 ? 7 : lt.wday;
+	let on = hhmm_minutes(b.timeon) ?? 0, off = hhmm_minutes(b.timeoff) ?? 0;
+	if (on == off) return index(b.weekdays, wd) >= 0;
+	if (on < off) return index(b.weekdays, wd) >= 0 && nowmin >= on && nowmin < off;
+	let prev = wd == 1 ? 7 : wd - 1;
+	return (index(b.weekdays, wd) >= 0 && nowmin >= on) ||
+	       (index(b.weekdays, prev) >= 0 && nowmin < off);
+}
+function ban_apply(force) {
+	let blocked = {}, macs = [];
+	if (state.cfg.role == "cap" && state.ban.enabled) {
+		let lt = ban_localtime();
+		let nowmin = lt.hour * 60 + lt.min;
+		for (let b in ban_read()) {
+			if (!ban_in_window(b, lt, nowmin)) continue;
+			for (let m in device_members_of(b.mac)) {
+				if (!blocked[m]) { blocked[m] = true; push(macs, m); }
+			}
+		}
+	}
+	macs = sort(macs);
+	state.ban.active = blocked;
+	let sig = join(",", macs);
+	if (!force && sig == state.ban.sig) return macs;
+	state.ban.sig = sig;
+	// nft 下发：失败静默，不让控制面崩溃
+	cmd_output("nft delete table inet wifiroam_ban 2>/dev/null");
+	if (state.cfg.role == "cap" && state.ban.enabled && length(macs)) {
+		cmd_output("nft add table inet wifiroam_ban 2>/dev/null");
+		cmd_output("nft add chain inet wifiroam_ban forward '{ type filter hook forward priority -10; policy accept; }' 2>/dev/null");
+		let script = "";
+		for (let m in macs)
+			script += sprintf("add rule inet wifiroam_ban forward ether saddr %s counter drop\n", maccolon(m));
+		try { fs.writefile(BAN_NFT_FILE, script); } catch (e) { return macs; }
+		cmd_output("nft -f " + BAN_NFT_FILE + " 2>/dev/null");
+		try { fs.unlink(BAN_NFT_FILE); } catch (e) { /* ignore */ }
+	}
+	return macs;
+}
+function ban_rule_count() {
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	let n = 0;
+	cur.foreach("wifiroam", "ban", function(s) { n++; });
+	return n;
+}
+function ban_reload_enabled() {
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	let cfg = cur.get("wifiroam", "schedule", "enabled");
+	state.ban.enabled = (cfg == null) ? (ban_rule_count() > 0) : (cfg == "1");
+}
+function ban_load() {
+	ban_reload_enabled();
+	ban_read();
+	ban_apply(true);
+}
+function ban_tick() {
+	if (state.cfg.role != "cap") return;
+	ban_apply(false);
+}
+
+// ==================================================================== end v5 additions
 
 // ------------------------------------------------------ app access control
 function appctl_app(id) {
@@ -3146,6 +3486,15 @@ function srv_rx(conn, req) {
 			req.reply({ ok: false });
 		}
 		break;
+	case "pin_update":
+		if (state.cfg.role == "cap") {
+			let res = pin_apply(args.mac, args.ap ?? "");
+			if (res.ok) alias_broadcast();
+			req.reply(res);
+		} else {
+			req.reply({ ok: false, error: "not_cap" });
+		}
+		break;
 	default:
 		req.reply({ ok: false, error: "unknown_method" });
 	}
@@ -4019,6 +4368,167 @@ let api_obj = {
 			return { ok: true, mac: mn, app: a.app, action: a.action, block: blocks };
 		},
 	},
+	device_history: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) { return devlist_view(); },
+	},
+	wake: {
+		args: { ubus_rpc_session: "", mac: "" },
+		call: function(req) {
+			let a = req.args;
+			if (!a.mac) return libubus.STATUS_INVALID_ARGUMENT;
+			let key = device_key(a.mac);
+			if (!state.devices[key]) {
+				key = macnorm(a.mac);
+				if (!state.devices[key]) return { ok: false, error: "unknown_device" };
+			}
+			if (state.devices[key].online) return { ok: false, error: "already_online" };
+			let members = device_members_of(key);
+			if (!length(members)) return { ok: false, error: "invalid_mac" };
+			let sent = 0;
+			for (let m in members)
+				if (length(m) == 12) sent += wol_send(m);
+			if (!sent) return { ok: false, error: "send_failed" };
+			return { ok: true, sent: sent, mac: maccolon(members[0]) };
+		},
+	},
+	set_pin: {
+		args: { ubus_rpc_session: "", mac: "", ap: "" },
+		call: function(req) {
+			let a = req.args;
+			if (!a.mac) return libubus.STATUS_INVALID_ARGUMENT;
+			if (state.cfg.role == "sap" && state.link?.authed) {
+				try {
+					state.link.chan.defer({
+						method: "pin_update",
+						data: { mac: a.mac, ap: a.ap ?? "" },
+						data_cb: function() {}, cb: function() {},
+					});
+				} catch (e) {
+					sap_disconnect();
+					return { ok: false, error: "link_down" };
+				}
+				return { ok: true, forwarded: true };
+			}
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let res = pin_apply(a.mac, a.ap ?? "");
+			if (res.ok) alias_broadcast();
+			return res;
+		},
+	},
+	ungroup_device: {
+		args: { ubus_rpc_session: "", mac: "" },
+		call: function(req) {
+			let a = req.args;
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			if (length(macnorm(a.mac ?? "")) != 12) return { ok: false, error: "invalid_mac" };
+			let res = device_ungroup(a.mac);
+			if (!res.ok) return res;
+			appctl_read_devices();
+			if (state.appctl.enabled) {
+				appctl_apply_rules();
+				appctl_dpi_daemon("reload");
+			}
+			ban_apply(true);
+			return res;
+		},
+	},
+	ban_list: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) {
+			let ok = (state.cfg.role == "cap");
+			let lt = ban_localtime();
+			let nowmin = lt.hour * 60 + lt.min;
+			let items = [];
+			for (let b in ban_read()) {
+				push(items, {
+					mac: b.mac, name: b.name, timeon: b.timeon, timeoff: b.timeoff,
+					weekdays: b.weekdays,
+					active: state.ban.enabled && ban_in_window(b, lt, nowmin),
+				});
+			}
+			let blocked = sort(keys(state.ban.active ?? {}));
+			return {
+				ok: ok, error: ok ? "" : "not_cap", enabled: state.ban.enabled,
+				items: items, blocked: blocked,
+			};
+		},
+	},
+	set_ban: {
+		args: { ubus_rpc_session: "", enabled: false },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let on = req.args.enabled ? true : false;
+			let cur = uci.cursor();
+			cur.load("wifiroam");
+			if (cur.get("wifiroam", "schedule") == null)
+				cur.set("wifiroam", "schedule", "schedule");
+			cur.set("wifiroam", "schedule", "enabled", on ? "1" : "0");
+			cur.commit("wifiroam");
+			state.ban.enabled = on;
+			ban_apply(true);
+			return { ok: true, enabled: on };
+		},
+	},
+	ban_set: {
+		args: { ubus_rpc_session: "", mac: "", name: "", timeon: "", timeoff: "", weekdays: "" },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let a = req.args;
+			let key = device_key(a.mac ?? "");
+			if (!(length(key) == 12 || (length(key) == 13 && substr(key, 0, 1) == "g")))
+				return { ok: false, error: "invalid_mac" };
+			let on = hhmm_minutes(a.timeon), off = hhmm_minutes(a.timeoff);
+			if (on == null || off == null) return { ok: false, error: "invalid_time" };
+			let days = ban_weekdays(a.weekdays);
+			if (!length(days)) return { ok: false, error: "invalid_weekdays" };
+			let name = a.name ?? "";
+			if (name == "") name = device_alias_of(key).name ?? "";
+			let cur = uci.cursor();
+			cur.load("wifiroam");
+			let sid = null;
+			let dups = [];
+			cur.foreach("wifiroam", "ban", function(s) {
+				if (device_key(s.mac ?? "") != key) return;
+				if (sid == null) sid = s[".name"];
+				else push(dups, s[".name"]);
+			});
+			for (let d in dups) cur.delete("wifiroam", d);
+			if (sid == null) sid = cur.add("wifiroam", "ban");
+			cur.set("wifiroam", sid, "mac", key);
+			cur.set("wifiroam", sid, "name", name);
+			cur.set("wifiroam", sid, "timeon", ban_hm_str(on));
+			cur.set("wifiroam", sid, "timeoff", ban_hm_str(off));
+			cur.set("wifiroam", sid, "weekdays", join(" ", sort(days)));
+			cur.delete("wifiroam", sid, "enabled");
+			cur.commit("wifiroam");
+			ban_reload_enabled();
+			ban_apply(true);
+			let blocked = false;
+			for (let m in device_members_of(key))
+				if (state.ban.active[m]) blocked = true;
+			return { ok: true, mac: key, blocked: blocked };
+		},
+	},
+	ban_del: {
+		args: { ubus_rpc_session: "", mac: "" },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let key = device_key(req.args.mac ?? "");
+			let cur = uci.cursor();
+			cur.load("wifiroam");
+			let sids = [];
+			cur.foreach("wifiroam", "ban", function(s) {
+				if (device_key(s.mac ?? "") == key) push(sids, s[".name"]);
+			});
+			if (!length(sids)) return { ok: false, error: "not_found" };
+			for (let sid in sids) cur.delete("wifiroam", sid);
+			cur.commit("wifiroam");
+			ban_reload_enabled();
+			ban_apply(true);
+			return { ok: true };
+		},
+	},
 };
 
 // ------------------------------------------------------- RSSI steering (11v)
@@ -4085,6 +4595,8 @@ reconfigure = function() {
 	state.wired_seen = {};
 	state.prev_owner = null;
 	state.steer_last = {};
+	ban_reload_enabled();
+	ban_apply(true);
 	send_hello();
 };
 
@@ -4134,9 +4646,11 @@ function main() {
 
 	load_config();
 	alias_load();
+	devlist_load();
 	detect_self();
 	// 建规则要用到本机接口/网桥信息，必须放在 detect_self 之后
 	appctl_load();
+	ban_load();
 	ensure_token();
 	// 首次启用插件：按默认设置开启漫游（自动选中本机 SSID）
 	roam_default_init();
@@ -4154,6 +4668,8 @@ function main() {
 	uloop.interval(TICK_INTERVAL, steer_tick);
 	uloop.interval(TICK_INTERVAL, guest_tick);
 	uloop.interval(TICK_INTERVAL, appctl_tick);
+	uloop.interval(TICK_INTERVAL, devlist_tick);
+	uloop.interval(TICK_INTERVAL, ban_tick);
 	uloop.interval(TICK_INTERVAL, function() {
 		if (state.cfg.role != "cap") return;
 		let cur = local_clients();
