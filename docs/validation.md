@@ -1,6 +1,6 @@
 # 验收矩阵与已知限制
 
-这是 **V1 试用范围**，不是宣告全量 P00–P12 已验收。目标基线是官方 OpenWrt 24.10.5 x86/64；IPK 不代表路由器镜像，也不证明其他架构能运行。
+这是 **V1 试用范围**，不是宣告全量 P00–P12 已验收。构建目标包括 OpenWrt 24.10.5 x86/64 的 IPK 和 OpenWrt 25.12.6 mediatek/filogic（`aarch64_cortex-a53`）的 APK。软件包不等于路由器镜像，其他版本、架构与真机无线兼容性不能据此推断。
 
 ## P00–P12 对照
 
@@ -18,12 +18,12 @@
 | P09 诊断 | 预检、无密钥的结构化诊断、128 条内存事件 | 无链路评分、资源统计、证书告警、完整导出包或 7×24 实测 |
 | P10 安全 | 管理接口绑定、mTLS 与双向叶指纹限制、默认无 WPS/RPC 最小写权限、版本/摘要与签名、0600 身份/配置记录、不拼接命令 | 无共享消息 HMAC/时间戳层（控制面用短 mTLS 会话与版本，发现不认证）、自动证书轮换/CRL、安全启动或生产渗透验收 |
 | P11 测试 | 源码与 UI 测试、SDK 编译、真实 socket 传输与无线文件事务、OpenWrt 用户空间安装冒烟 | 射频、物理回程、掉电、跑机、压测、抓包和 OTA 需要目标板 |
-| P12 集成 | 可复现的官方 SDK x86/64 脚本与 CI、可将两个包移植到目标 SDK、安装文档 | 不发布可刷或签名量产固件；三频/双频正式 profile 需机型、闪存布局和现有固件版本 |
+| P12 集成 | 官方 x86/64 IPK 与 ARM64 Cortex-A53 APK 的 SDK 和 CI、安装文档 | 不发布可刷或签名量产固件；三频/双频正式 profile 需机型、闪存布局和现有固件版本 |
 
 ## 已执行的验证
 
 - Windows 上运行 `python -m unittest discover -s tests -v`、LuCI [DOM/RPC 冒烟测试](<../luci-app-meshd/tests/smoke.cjs>)、服务脚本静态语法和独立 PKI 签发自检；Linux x86_64 虚拟机复跑前两项和 `make -C tests test`。
-- 用 [固定版本的 SDK 构建脚本](<../scripts/build-sdk.sh>) 实际交叉编译两个 IPK。核对守护进程 ELF x86-64/musl 与 libubus/libubox/libuci/mbedTLS ABI、IPK 的依赖/配置保留和 LuCI 文件清单。
+- 24.10.5 已实际交叉编译两个 IPK，并核对守护进程 ELF x86-64/musl、库 ABI、配置保留和 LuCI 文件清单。[SDK 构建脚本](<../scripts/build-sdk.sh>) 对 25.12.6 的 APK 另外核验架构、依赖、AArch64 ELF 和配置保留；云端结果见 [GitHub Actions](https://github.com/1823774778/openwrtmesh/actions/workflows/build.yml)。APK 无线预检的[隔离测试](<../package/meshd/tests/README-wifi.md>) 在 x86/64 runner 模拟两种包管理元数据，不代表 ARM 路由器真机验收。
 - 在隔离 Linux 网络命名空间中，使用官方 SDK 产出的库和 [真实 UDP/mTLS 测试程序](<../package/meshd/tests/test_transport.c>)，测试发现网络隔离、错误网关指纹、未授权叶证书、最大允许帧及签名响应。使用独立测试证书，不涉及现场设备。
 - 以 OpenWrt 24.10.5 libuci/mbedcrypto 在临时目录验证无线预检和事务，覆盖特殊字符、保留非管理 AP 与 WDS、冲突时拒绝覆盖、恢复原始字节。
 - 在官方 24.10.5 x86/64 用户空间的隔离环境中，`opkg` 安装两包、启动 `ubusd` 与 `meshd`、检查 21 项 RPC；默认 `disabled/candidate`、`transport=false`、未授权写和未启用方法均不执行。该环境不含真机无线与 procd 的完整启动链。

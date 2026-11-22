@@ -1,4 +1,4 @@
-# OpenWrt 24.10 部署手册
+# OpenWrt 24.10 / 25.12 部署手册
 
 > 先在 **一台网关 + 一台节点** 的隔离测试网中试用，并保留有线维护口。发布会重载无线，已有客户端会短暂断开，修改 SSID 或密码后客户端需重新连接。默认关闭 Mesh 控制网络；安装不会替你迁移 WAN、DHCP、VLAN 或无线回程。
 
@@ -7,7 +7,7 @@
 - **首选有线**：网关负责 WAN、NAT、DNS 和 DHCP。先把节点按现有 OpenWrt [桥接 AP](https://openwrt.org/docs/guide-user/network/wifi/wifiextenders/bridgedap) 方式接入，给节点配置不冲突的管理 IP；业务网只运行**一台** DHCP 服务器。不要用两个并行的桥接路径测试。
 - **单跳 WDS（可选）**：按 [OpenWrt WDS 指南](https://openwrt.org/docs/guide-user/network/wifi/wifiextenders/wds) 手工配置并验证驱动支持；回程 BSS/STA **不得放进本插件的 AP 列表**。优先用独立 radio，不能带着另一路并行有线桥接盲试。桥上是否能透传管理 VLAN，由设备和驱动决定，先独立验证。首轮验收用有线。
 - 为控制面配置**独立管理 VLAN/网段**和静态 IPv4。示例：网关 `192.168.90.1/24`、节点 `192.168.90.2/24`、定向广播 `192.168.90.255`。地址只是示例，不要求 VLAN ID 4094；建立 VLAN 需按硬件 DSA/交换机配置。仅在该受控接口/防火墙区放行 UDP `41007`（同二层的发现）和到网关的 TCP `41008`，不要对 WAN、IoT、访客或普通 Wi‑Fi 客户端开放；不要为此关闭防火墙。检查节点能通过管理地址访问网关，确认时钟已同步。
-- 用 `opkg list-installed` 确认安装了**完整 wpad**（如 `wpad-mbedtls` 或 `wpad-openssl`），不能是 `wpad-basic-*`。预检也支持完整 hostapd 包。请按当前固件的包源与官方说明，用有线连接备份后替换冲突包；不要在生产 Wi‑Fi 上盲目卸载。仅管理 mac80211 的 WPA2-Personal `psk2` / `psk2+ccmp` 客户端 AP，不管理 6 GHz、WPA3、WDS、企业认证、自定义 PSK 文件或 VLAN 型 AP。若某客户端不兼容 11r，先保持 FT 关闭。
+- 用 `opkg list-installed`（24.10）或 `apk list --installed 'wpad*' 'hostapd*'`（25.12）确认安装了**完整 wpad**（如 `wpad-mbedtls` 或 `wpad-openssl`），不能是 `wpad-basic-*`。预检也支持完整 hostapd 包。请按当前固件的包源与官方说明，用有线连接备份后替换冲突包；不要在生产 Wi‑Fi 上盲目卸载。仅管理 mac80211 的 WPA2-Personal `psk2` / `psk2+ccmp` 客户端 AP，不管理 6 GHz、WPA3、WDS、企业认证、自定义 PSK 文件或 VLAN 型 AP。若某客户端不兼容 11r，先保持 FT 关闭。
 - 先通过 LuCI 正常启用需要纳管的客户端 AP，使之关联到已配置好的业务 LAN。为每个 AP 在本机的 `/etc/config/wireless` 中使用稳定的**命名 section**和唯一明确的 `option ifname`。例如在原有 `radio0` 上编辑一个测试 AP（`lan` 必须是你既有的业务网络；设好真实测试密钥，勿复制示例字面密码）：
 
 ```uci
@@ -25,12 +25,27 @@ config wifi-iface 'mesh_clients_2g'
 
 ## 2. 安装正确架构的软件包
 
-用与你的 **OpenWrt 版本、目标、子目标**一致的 SDK 构建。用 `cat /etc/openwrt_release` 和 `opkg print-architecture` 核对设备后再安装；样板 x86/64 构建的 `meshd_*_x86_64.ipk` 不适用于 ARM/MIPS。不要用 `--force-depends` 或 `--force-architecture`。32 位设备的性能尚待测。
+用 `cat /etc/openwrt_release` 核对 **OpenWrt 版本和目标/子目标**；用 `opkg print-architecture` 或 `apk --print-arch` 核对软件包架构。仅从[本项目的 GitHub Actions](https://github.com/1823774778/openwrtmesh/actions/workflows/build.yml) 下载匹配的制品，通过有线维护网把解压后的两个包传到 `/tmp`。如果设备版本、目标或 ABI 不匹配，请用设备对应的 SDK 重编，不要绕过依赖或架构检查。
+
+**OpenWrt 25.12.6 / mediatek/filogic / `aarch64_cortex-a53`（APK）：**
 
 ```sh
-# 将匹配的 IPK 先通过维护网传到 /tmp；必要时从该固件官方包源补依赖。
+apk update
+apk add --allow-untrusted /tmp/meshd-0.1.0-r2.apk /tmp/luci-app-meshd-0.1.0-r1.apk
+```
+
+Actions 的两个 APK 是未签名的独立构建包；仅在核对下载来源和摘要后，对这条安装命令临时使用 `--allow-untrusted`。不要关闭软件源的签名验证；生产环境建议使用自己的签名包源。如果使用后续版本，把命令里的文件名换成实际下载的文件名。
+
+**OpenWrt 24.10.5 / x86/64 / `x86_64`（IPK）：**
+
+```sh
 opkg update
-opkg install /tmp/meshd_0.1.0-r1_x86_64.ipk /tmp/luci-app-meshd_0.1.0-r1_all.ipk
+opkg install /tmp/meshd_0.1.0-r2_x86_64.ipk /tmp/luci-app-meshd_0.1.0-r1_all.ipk
+```
+
+两种格式安装后均可运行：
+
+```sh
 /etc/init.d/meshd enable
 /etc/init.d/meshd start
 ubus call meshd status

@@ -10,11 +10,16 @@
 
 **当前不是自动选路的多跳 Mesh 固件。** 不自动建网桥/VLAN、不自动切换回程；未实现 802.11s/batman-adv 自愈、主动漫游引导、整批回滚、访客/IoT/QoS 或 OTA。兼容性、漫游时延、路径恢复与资源指标待真机验收。分项范围见 [验收矩阵](<docs/validation.md>)。
 
-## 获取 IPK
+## 获取 IPK / APK
 
-开发验证以 [OpenWrt 24.10.5 x86/64 SDK](https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/) 为基线。**x86/64 样板包不能装到 ARM 或 MIPS 路由器**。先在设备核对 `cat /etc/openwrt_release` 和 `opkg print-architecture`；同为 24.10 也应拿目标固件版本和 ABI 匹配的 SDK 重编。未验证 APK 软件包的 OpenWrt 25.12+，不建议强制安装。
+推送提交会触发 [GitHub Actions 构建](https://github.com/1823774778/openwrtmesh/actions/workflows/build.yml)，也可在该页点 **Run workflow**。从成功运行的 **Artifacts** 下载对应 ZIP；每份都含 `meshd` 和 `luci-app-meshd` 两个包。
 
-**推荐通过 GitHub Actions 构建。** 推送提交会自动触发 [OpenWrt package build](https://github.com/1823774778/openwrtmesh/actions/workflows/build.yml)；也可在 Actions 里点 **Run workflow**。运行成功后，打开该次运行，下载 **Artifacts → `openwrt-24.10.5-x86-64-ipk`** 并解压，内含 `meshd` 和 `luci-app-meshd`。
+| 固件与软件包架构 | 格式 | Actions 制品 |
+|---|---|---|
+| [OpenWrt 24.10.5 x86/64](https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/)，`x86_64` | IPK | `openwrt-24.10.5-x86-64-ipk` |
+| [OpenWrt 25.12.6 mediatek/filogic](https://downloads.openwrt.org/releases/25.12.6/targets/mediatek/filogic/)，ARM64 Cortex‑A53，`aarch64_cortex-a53` | APK | `openwrt-25.12.6-aarch64-cortex-a53-apk` |
+
+先在路由器用 `cat /etc/openwrt_release` 核对固件版本，再用 `apk --print-arch` 或 `opkg print-architecture` 核对软件包架构。**CPU 名称相同不代表软件包 ABI 匹配**；不同版本、目标或 ABI 请使用对应 SDK，不要强制安装。
 
 在自有 Linux x86_64 构建机上也可复现（普通用户）：
 
@@ -22,10 +27,11 @@
 # Debian / Ubuntu 的 SDK 宿主依赖
 sudo apt-get install build-essential binutils curl file gawk gettext git libncurses-dev \
     patch perl pkgconf python3 rsync unzip wget zlib1g-dev zstd
-SDK_OUTPUT_DIR="$PWD/dist" bash scripts/build-sdk.sh
+SDK_OUTPUT_DIR="$PWD/dist/ipk" bash scripts/build-sdk.sh x86-64-ipk
+SDK_OUTPUT_DIR="$PWD/dist/apk" bash scripts/build-sdk.sh aarch64-cortex-a53-apk
 ```
 
-[构建脚本](<scripts/build-sdk.sh>) 校验官方 SDK 的 SHA‑256，固定官方 feeds 的提交，再编译两套 IPK；[CI](<.github/workflows/build.yml>) 复用同一套流程，不输出可刷固件。
+两种目标都在 Linux x86_64 构建机上交叉构建，无需 ARM 主机。[构建脚本](<scripts/build-sdk.sh>) 校验官方 SDK SHA-256，并固定官方 feeds 的提交；[CI](<.github/workflows/build.yml>) 分别编译和上传对应的两个包，不输出可刷固件。
 
 其他目标的通用集成方式：在**相同固件版本与目标**的官方 SDK/源码树中，把 `package/meshd` 和 `luci-app-meshd` 两个包目录分别放到 `package/meshd`、`package/luci-app-meshd`。按目标版本配置官方 feeds，安装 `libubox`、`libubus`、`libuci`、`libblobmsg-json`、`libmbedtls`、`luci-base` 对应配方；选择 `CONFIG_PACKAGE_meshd=m` 和 `CONFIG_PACKAGE_luci-app-meshd=m` 后执行：
 

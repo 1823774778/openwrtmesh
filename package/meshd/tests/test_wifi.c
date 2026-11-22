@@ -21,6 +21,16 @@ extern const char mesh_wifi_test_link_root[];
 #define BACKUP ROOT "state/wireless.backup"
 #define STAGE ROOT "state/wireless.stage"
 #define STATUS ROOT "status"
+#define APK_ROOT ROOT "apk"
+#define APK_BIN ROOT "apk-bin"
+#define APK_LIST APK_ROOT "/packages"
+#define APK_FULL APK_LIST "/wpad-mbedtls.list"
+#define APK_MESH APK_LIST "/wpad-mesh-openssl.list"
+#define APK_HOSTAPD APK_LIST "/hostapd-openssl.list"
+#define APK_BASIC APK_LIST "/wpad-basic-mbedtls.list"
+#define APK_COMMON APK_LIST "/hostapd-common.list"
+#define HOSTAPD ROOT "sbin/hostapd"
+#define WPAD ROOT "sbin/wpad"
 #define CLI_EDIT ROOT "delta/wireless"
 #define LUCI_EDIT ROOT "rpcd/uci-example/wireless"
 #define LUCI_SNAPSHOT ROOT "rpcd/snapshot-files/wireless"
@@ -56,6 +66,23 @@ static const char original[] =
 	" option device 'radio0'\n";
 
 static const char installed[] = "Package: wpad-mbedtls\nStatus: install user installed\n\n";
+static const char apk_wpad[] =
+	"/etc/config/radius\n"
+	"/usr/sbin/hostapd\n"
+	"/usr/sbin/hostapd-radius\n"
+	"/usr/sbin/wpa_supplicant\n"
+	"/usr/sbin/wpad\n"
+	"/usr/share/hostap/hostapd.uc\n";
+static const char apk_hostapd[] =
+	"/etc/config/radius\n"
+	"/usr/sbin/hostapd\n"
+	"/usr/sbin/hostapd-radius\n"
+	"/usr/share/hostap/hostapd.uc\n";
+static const char apk_basic[] =
+	"/usr/sbin/hostapd\n"
+	"/usr/sbin/wpa_supplicant\n"
+	"/usr/sbin/wpad\n"
+	"/usr/share/hostap/hostapd.uc\n";
 static const char delta[] = "wireless.client_ap.wds='1'\n";
 static const char conflict[] = "# concurrent administrator edit\n";
 
@@ -114,6 +141,97 @@ static void rejected_config(struct mesh_wifi *w, const char *added)
 	assert(!mesh_wifi_pending());
 }
 
+static void rejected_provider(struct mesh_wifi *w, const char *expected)
+{
+	char error[128];
+
+	assert(mesh_wifi_precheck(w, error, sizeof(error)) < 0);
+	assert(!strcmp(error, expected));
+}
+
+static void check_apk_fixtures(struct mesh_wifi *w, const struct mesh_profile *p)
+{
+	static const char verify_error[] = "cannot verify installed hostapd package";
+	char error[128];
+
+	/* Keep an installed, full opkg stanza around as a stale record. */
+	put(APK_BIN, "fixture only: never executed\n");
+	rejected_provider(w, verify_error); /* missing APK root on an APK system */
+	assert(!unlink(APK_BIN));
+	assert(!symlink("state", APK_ROOT));
+	rejected_provider(w, verify_error); /* no fallback from a symlink directory */
+	assert(!unlink(APK_ROOT));
+	assert(!mkdir(APK_ROOT, 0755));
+	rejected_provider(w, verify_error); /* missing APK package metadata */
+	assert(!symlink("../state", APK_LIST));
+	rejected_provider(w, verify_error);
+	assert(!unlink(APK_LIST));
+	assert(!mkdir(APK_LIST, 0755));
+	put(APK_COMMON, "/etc/init.d/wpad\n");
+	rejected_provider(w, verify_error); /* hostapd-common alone is not a provider */
+
+	assert(!rename(HOSTAPD, WPAD));
+	assert(!symlink("wpad", HOSTAPD));
+	put(APK_BASIC, apk_basic);
+	rejected_provider(w, "full wpad or hostapd required");
+	put(APK_FULL, apk_wpad);
+	assert(!chmod(APK_FULL, 0644)); /* official lists may be owner-writable */
+	rejected_provider(w, "full wpad or hostapd required"); /* conflicting providers */
+	assert(!unlink(APK_BASIC));
+	assert(!unlink(STATUS)); /* a working APK does not need opkg at all */
+	ok(mesh_wifi_precheck(w, error, sizeof(error)), error);
+	ok(mesh_wifi_stage(w, p, error, sizeof(error)), error);
+	assert(mesh_wifi_pending());
+	assert(!mesh_wifi_clear());
+	assert(!mesh_wifi_pending());
+	put(STATUS, installed);
+
+	put(APK_MESH, apk_wpad);
+	rejected_provider(w, verify_error); /* two full providers */
+	assert(!unlink(APK_FULL));
+	ok(mesh_wifi_precheck(w, error, sizeof(error)), error); /* mesh name has no ABI suffix */
+	assert(!unlink(APK_MESH));
+	rejected_provider(w, verify_error); /* uninstall, even with stale opkg */
+
+	put(APK_FULL, "/usr/sbin/hostapd\n/usr/sbin/wpad.backup\n");
+	rejected_provider(w, verify_error); /* no substring matches */
+	put(APK_FULL, "/usr/sbin/hostapd\n/usr/sbin/wpad");
+	rejected_provider(w, verify_error); /* truncated final line */
+	put(APK_FULL, apk_wpad);
+	assert(!chmod(APK_FULL, 0664));
+	rejected_provider(w, verify_error);
+	assert(!chmod(APK_FULL, 0600));
+	assert(!chown(APK_FULL, 65534, 65534));
+	rejected_provider(w, verify_error);
+	assert(!unlink(APK_FULL));
+	assert(!mkfifo(APK_FULL, 0600));
+	rejected_provider(w, verify_error); /* special files must not block */
+	assert(!unlink(APK_FULL));
+	assert(!symlink("wpad-mesh-openssl.list", APK_FULL));
+	put(APK_MESH, apk_wpad);
+	rejected_provider(w, verify_error);
+	assert(!unlink(APK_MESH));
+	assert(!unlink(APK_FULL));
+
+	put(APK_FULL, apk_wpad);
+	assert(!chmod(WPAD, 0600));
+	rejected_provider(w, verify_error); /* no executable behind the expected link */
+	assert(!chmod(WPAD, 0755));
+	assert(!unlink(HOSTAPD));
+	assert(!symlink("./wpad", HOSTAPD));
+	rejected_provider(w, verify_error); /* only the official link layout */
+	assert(!unlink(HOSTAPD));
+	assert(!rename(WPAD, HOSTAPD));
+	assert(!unlink(APK_FULL));
+	put(APK_HOSTAPD, apk_hostapd);
+	ok(mesh_wifi_precheck(w, error, sizeof(error)), error); /* standalone binary */
+	assert(!unlink(APK_HOSTAPD));
+	assert(!unlink(APK_COMMON));
+	assert(!rmdir(APK_LIST));
+	assert(!rmdir(APK_ROOT));
+	ok(mesh_wifi_precheck(w, error, sizeof(error)), error); /* 24.10 legacy path */
+}
+
 int main(void)
 {
 	struct mesh_wifi w = { .count = 1, .sections = { "client_ap" } };
@@ -138,6 +256,7 @@ int main(void)
 	put(STATUS, "Package: wpad-mini\nStatus: install user installed\n");
 	assert(mesh_wifi_precheck(&w, error, sizeof(error)) < 0);
 	put(STATUS, installed);
+	check_apk_fixtures(&w, &p);
 
 	put(CLI_EDIT, delta);
 	assert(mesh_wifi_precheck(&w, error, sizeof(error)) < 0);

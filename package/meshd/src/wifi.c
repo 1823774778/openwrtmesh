@@ -24,6 +24,11 @@
 #define CONFIG_DIR "/etc/config"
 #define STATE_DIR "/etc/meshd"
 #define OPKG_STATUS "/usr/lib/opkg/status"
+#define APK_ROOT "/lib/apk"
+#define APK_BIN "/usr/bin/apk"
+/* Paths stored in the package payload list, independent of filesystem reads. */
+#define APK_PAYLOAD_DIR "/usr/sbin"
+#define HOSTAPD_DIR APK_PAYLOAD_DIR
 #define WIRELESS "wireless"
 #define BACKUP "wireless.backup"
 #define STAGING "wireless.stage"
@@ -31,6 +36,23 @@
 #define TMP_SUFFIX "/" TMP_PREFIX "XXXXXX"
 #define WIRELESS_MAX (1024U * 1024U)
 #define OPKG_STATUS_MAX (4U * 1024U * 1024U)
+#define APK_LIST_MAX 4096U
+
+static const char *const full_providers[] = {
+	"wpad", "wpad-openssl", "wpad-wolfssl", "wpad-mbedtls",
+	"wpad-mesh-openssl", "wpad-mesh-wolfssl", "wpad-mesh-mbedtls",
+	"hostapd", "hostapd-openssl", "hostapd-wolfssl", "hostapd-mbedtls",
+};
+
+/* Actual conflicting providers in OpenWrt 25.12, not virtual package names. */
+static const char *const reduced_providers[] = {
+	"wpad-basic", "wpad-basic-openssl", "wpad-basic-wolfssl", "wpad-basic-mbedtls",
+	"wpad-mini", "hostapd-basic", "hostapd-basic-openssl", "hostapd-basic-wolfssl",
+	"hostapd-basic-mbedtls", "hostapd-mini",
+};
+
+static const char cannot_verify_hostapd[] = "cannot verify installed hostapd package";
+static const char full_hostapd_required[] = "full wpad or hostapd required";
 
 struct wifi_image {
 	struct stat st;
@@ -250,14 +272,8 @@ static int configure_ap(struct uci_context *ctx, struct uci_section *s,
 /* Identify package stanzas, not strings in descriptions/Provides/Conffiles. */
 static int provider(const char *name)
 {
-	static const char *const full[] = {
-		"wpad", "wpad-openssl", "wpad-wolfssl", "wpad-mbedtls",
-		"wpad-mesh-openssl", "wpad-mesh-wolfssl", "wpad-mesh-mbedtls",
-		"hostapd", "hostapd-openssl", "hostapd-wolfssl", "hostapd-mbedtls",
-	};
-
-	for (size_t i = 0; i < sizeof(full) / sizeof(full[0]); i++) {
-		if (!strcmp(name, full[i]))
+	for (size_t i = 0; i < sizeof(full_providers) / sizeof(full_providers[0]); i++) {
+		if (!strcmp(name, full_providers[i]))
 			return 1;
 	}
 	if (!strncmp(name, "wpad-", 5) ||
@@ -269,9 +285,9 @@ static int provider(const char *name)
 
 static bool same_stat(const struct stat *a, const struct stat *b);
 
-static const char *check_hostapd(void)
+static const char *check_hostapd_opkg(void)
 {
-	const char *reason = "cannot verify installed hostapd package";
+	const char *reason = cannot_verify_hostapd;
 	struct stat st, end;
 	char *line = NULL;
 	size_t cap = 0, total = 0;
@@ -336,13 +352,163 @@ static const char *check_hostapd(void)
 	if (lstat(OPKG_STATUS, &end) || !same_stat(&st, &end))
 		goto done;
 	if (unsupported)
-		reason = "full wpad or hostapd required";
-	else if (full == 1 && access("/usr/sbin/hostapd", X_OK) == 0)
+		reason = full_hostapd_required;
+	else if (full == 1 && access(HOSTAPD_DIR "/hostapd", X_OK) == 0)
 		reason = NULL;
 
 done:
 	free(line);
 	fclose(fp);
+	return reason;
+}
+
+static int open_dir_at(int dir, const char *path, bool private);
+
+/* APK installs this list as an ordinary package-owned payload file (and
+ * removes it with that payload). OpenWrt writes one absolute file or link
+ * path per line; none of these hostapd/wpad package names has an ABI suffix. */
+static int apk_provider(int dir, const char *pkg, bool wpad)
+{
+	char name[32], buf[APK_LIST_MAX];
+	struct stat st, end;
+	bool have_hostapd = false, have_wpad = false;
+	size_t pos = 0;
+	int fd, result = -1;
+	int len = snprintf(name, sizeof(name), "%s.list", pkg);
+
+	if (len < 0 || (size_t)len >= sizeof(name))
+		return -1;
+	fd = openat(dir, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0)
+		return errno == ENOENT ? 0 : -1;
+	/* APK lists may be 0644; only root may write them, and we never do. */
+	if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid ||
+	    (st.st_mode & 022) || st.st_size <= 0 || st.st_size >= (off_t)sizeof(buf))
+		goto out;
+	/* Read at most the limit even if the file grows after fstat. */
+	while (pos < sizeof(buf)) {
+		ssize_t n = read(fd, buf + pos, sizeof(buf) - pos);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0)
+			goto out;
+		if (!n)
+			break;
+		pos += (size_t)n;
+	}
+	if (pos != (size_t)st.st_size || memchr(buf, '\0', pos) || memchr(buf, '\r', pos))
+		goto out;
+	for (char *line = buf, *limit = buf + pos; line < limit;) {
+		char *eol = memchr(line, '\n', (size_t)(limit - line));
+
+		if (!eol || eol <= line + 1 || *line != '/')
+			goto out;
+		*eol = '\0';
+		if (!strcmp(line, APK_PAYLOAD_DIR "/hostapd")) {
+			if (have_hostapd)
+				goto out;
+			have_hostapd = true;
+		} else if (!strcmp(line, APK_PAYLOAD_DIR "/wpad")) {
+			if (have_wpad)
+				goto out;
+			have_wpad = true;
+		}
+		line = eol + 1;
+	}
+	if (!have_hostapd || have_wpad != wpad ||
+	    fstatat(dir, name, &end, AT_SYMLINK_NOFOLLOW) || !same_stat(&st, &end))
+		goto out;
+	result = 1;
+
+out:
+	close(fd);
+	return result;
+}
+
+static bool wpad_package(const char *pkg)
+{
+	return !strncmp(pkg, "wpad", sizeof("wpad") - 1);
+}
+
+static bool apk_hostapd_executable(bool wpad)
+{
+	int dir = open_dir_at(AT_FDCWD, HOSTAPD_DIR, false);
+	struct stat st;
+	bool ok = false;
+
+	if (dir < 0)
+		return false;
+	if (wpad) {
+		char target[sizeof("wpad")];
+		ssize_t n = readlinkat(dir, "hostapd", target, sizeof(target));
+
+		/* The upstream multicall executable is reached by this exact link. */
+		if (n != (ssize_t)(sizeof(target) - 1) || memcmp(target, "wpad", sizeof(target) - 1))
+			goto out;
+	}
+	ok = !fstatat(dir, wpad ? "wpad" : "hostapd", &st, AT_SYMLINK_NOFOLLOW) &&
+	     S_ISREG(st.st_mode) && !st.st_uid && !(st.st_mode & 022) &&
+	     faccessat(dir, "hostapd", X_OK, 0) == 0;
+out:
+	close(dir);
+	return ok;
+}
+
+static const char *check_hostapd_apk(int root)
+{
+	const char *reason = cannot_verify_hostapd, *full = NULL;
+	int dir = open_dir_at(root, "packages", false);
+	struct stat before, after;
+
+	if (dir < 0)
+		return reason;
+	if (fstat(dir, &before))
+		goto out;
+	for (size_t i = 0; i < sizeof(reduced_providers) / sizeof(reduced_providers[0]); i++) {
+		const char *pkg = reduced_providers[i];
+		int rc = apk_provider(dir, pkg, wpad_package(pkg));
+
+		if (rc < 0)
+			goto out;
+		if (rc > 0) {
+			reason = full_hostapd_required;
+			goto out;
+		}
+	}
+	for (size_t i = 0; i < sizeof(full_providers) / sizeof(full_providers[0]); i++) {
+		const char *pkg = full_providers[i];
+		int rc = apk_provider(dir, pkg, wpad_package(pkg));
+
+		if (rc < 0 || (rc > 0 && full))
+			goto out;
+		if (rc > 0)
+			full = pkg;
+	}
+	if (full && apk_hostapd_executable(wpad_package(full)) &&
+	    !fstatat(root, "packages", &after, AT_SYMLINK_NOFOLLOW) && same_stat(&before, &after))
+		reason = NULL;
+
+out:
+	close(dir);
+	return reason;
+}
+
+static const char *check_hostapd(void)
+{
+	const char *reason;
+	struct stat st;
+	int root = open_dir_at(AT_FDCWD, APK_ROOT, false);
+
+	/* APK takes precedence even if its metadata is incomplete. A stale opkg
+	 * stanza must never approve the currently installed basic/mini daemon. */
+	if (root < 0) {
+		if (errno == ENOENT && lstat(APK_BIN, &st) && errno == ENOENT)
+			return check_hostapd_opkg();
+		return cannot_verify_hostapd;
+	}
+	reason = check_hostapd_apk(root);
+	close(root);
 	return reason;
 }
 
@@ -402,10 +568,10 @@ static const char *check_edits(void)
 	       rc < 0 ? "cannot check wireless edits" : NULL;
 }
 
-static int open_dir(const char *path, bool private)
+static int open_dir_at(int dir, const char *path, bool private)
 {
 	struct stat st;
-	int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+	int fd = openat(dir, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 
 	if (fd < 0)
 		return fd;
@@ -416,6 +582,11 @@ static int open_dir(const char *path, bool private)
 		return -1;
 	}
 	return fd;
+}
+
+static int open_dir(const char *path, bool private)
+{
+	return open_dir_at(AT_FDCWD, path, private);
 }
 
 static bool image_stat_valid(const struct stat *st, bool private)
