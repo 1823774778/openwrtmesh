@@ -17,9 +17,23 @@
 | 固件与软件包架构 | 格式 | Actions 制品 |
 |---|---|---|
 | [OpenWrt 24.10.5 x86/64](https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/)，`x86_64` | IPK | `openwrt-24.10.5-x86-64-ipk` |
-| [OpenWrt 25.12.6 mediatek/filogic](https://downloads.openwrt.org/releases/25.12.6/targets/mediatek/filogic/)，ARM64 Cortex‑A53，`aarch64_cortex-a53` | APK | `openwrt-25.12.6-aarch64-cortex-a53-apk` |
+| [OpenWrt 24.10.5 mediatek/filogic](https://downloads.openwrt.org/releases/24.10.5/targets/mediatek/filogic/)，`aarch64_cortex-a53` | IPK | `openwrt-24.10.5-aarch64-cortex-a53-ipk` |
+| [OpenWrt 25.12.6 mediatek/filogic](https://downloads.openwrt.org/releases/25.12.6/targets/mediatek/filogic/)，`aarch64_cortex-a53` | APK | `openwrt-25.12.6-aarch64-cortex-a53-apk` |
 
 先在路由器用 `cat /etc/openwrt_release` 核对固件版本，再用 `apk --print-arch` 或 `opkg print-architecture` 核对软件包架构。**CPU 名称相同不代表软件包 ABI 匹配**；不同版本、目标或 ABI 请使用对应 SDK，不要强制安装。
+
+包还绑定固件所用的库 ABI 名。安装报 `no such package` 时，先在设备上跑只读诊断，把输出贴到 Issue：
+
+```sh
+sh scripts/check-device.sh
+```
+
+| 制品 | 设备上必须已存在的库 |
+|---|---|
+| 24.10.5 IPK（x86_64 / `aarch64_cortex-a53`） | `libubox20240329`、`libubus20250102`、`libblobmsg-json20240329`、`libuci20250120`、`libmbedtls21` |
+| 25.12.6 APK（`aarch64_cortex-a53`） | `libubox20260213`、`libubus20251202`、`libblobmsg-json20260213`、`libuci20250120`、`libmbedtls21` |
+
+构建脚本会打印实际生成的依赖清单，以它为准。设备上的库名不同就说明固件版本不匹配：用该版本的 SDK 重编，或升级到对应官方固件；`--force-*` 只会让动态链接在启动时失败。
 
 在自有 Linux x86_64 构建机上也可复现（普通用户）：
 

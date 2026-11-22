@@ -52,6 +52,11 @@ jobs:
             format: apk
             wifi_test: '0'
             artifact: openwrt-25.12.6-aarch64-cortex-a53-apk
+          - name: OpenWrt 24.10.5 ARM64 Cortex-A53 IPK
+            profile: aarch64-cortex-a53-ipk
+            format: ipk
+            wifi_test: '0'
+            artifact: openwrt-24.10.5-aarch64-cortex-a53-ipk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

@@ -31,7 +31,7 @@ config wifi-iface 'mesh_clients_2g'
 
 ```sh
 apk update
-apk add --allow-untrusted /tmp/meshd-0.1.0-r2.apk /tmp/luci-app-meshd-0.1.0-r1.apk
+apk add --allow-untrusted /tmp/meshd-0.1.0-r3.apk /tmp/luci-app-meshd-0.1.0-r1.apk
 ```
 
 Actions 的两个 APK 是未签名的独立构建包；仅在核对下载来源和摘要后，对这条安装命令临时使用 `--allow-untrusted`。不要关闭软件源的签名验证；生产环境建议使用自己的签名包源。如果使用后续版本，把命令里的文件名换成实际下载的文件名。
@@ -48,7 +48,14 @@ sh scripts/check-device.sh
 
 ```sh
 opkg update
-opkg install /tmp/meshd_0.1.0-r2_x86_64.ipk /tmp/luci-app-meshd_0.1.0-r1_all.ipk
+opkg install /tmp/meshd_0.1.0-r3_x86_64.ipk /tmp/luci-app-meshd_0.1.0-r1_all.ipk
+```
+
+**OpenWrt 24.10.5 / mediatek/filogic / `aarch64_cortex-a53`（IPK，Cortex-A53 但仍是 opkg）：**
+
+```sh
+opkg update
+opkg install /tmp/meshd_0.1.0-r3_aarch64_cortex-a53.ipk /tmp/luci-app-meshd_0.1.0-r1_all.ipk
 ```
 
 两种格式安装后均可运行：

@@ -6,9 +6,10 @@ export LC_ALL=C
 umask 022
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-    printf 'Usage: bash scripts/build-sdk.sh [x86-64-ipk|aarch64-cortex-a53-apk]\n\n'
-    printf 'Default: x86-64-ipk (OpenWrt 24.10.5 x86/64).\n'
-    printf 'aarch64-cortex-a53-apk: OpenWrt 25.12.6 mediatek/filogic.\n'
+    printf 'Usage: bash scripts/build-sdk.sh [x86-64-ipk|aarch64-cortex-a53-ipk|aarch64-cortex-a53-apk]\n\n'
+    printf 'Default: x86-64-ipk (OpenWrt 24.10.5 x86/64, IPK).\n'
+    printf 'aarch64-cortex-a53-ipk: OpenWrt 24.10.5 mediatek/filogic (IPK).\n'
+    printf 'aarch64-cortex-a53-apk: OpenWrt 25.12.6 mediatek/filogic (APK).\n'
     printf 'Both SDKs require a Linux x86_64 host, a non-root user, and the OpenWrt SDK host tools.\n'
     printf 'Optional: SDK_CACHE_DIR, SDK_OUTPUT_DIR, SDK_JOBS, SDK_VERBOSE=s, SDK_KEEP_WORK=1.\n'
     printf 'SDK_WIFI_TEST=1 runs isolated Wi-Fi fixtures with the x86/64 SDK (requires sudo).\n'
@@ -28,6 +29,18 @@ case "$profile" in
         pkg_ext=ipk
         # https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/sha256sums
         sdk_sha256=d3e8ea62fc1c12f93a9c808c2ef4c01b6e149ee240bcd5a74d15bebcbc385bdd
+        base_rev=4f7e6e554be2aef6a55be36f9f954d56705eb2ee
+        packages_rev=953b6d47b4e9f0ad3c39547c6d3f9a828f10e206
+        luci_rev=d88390be4ec9722cb427fee03368fc8c8582627d
+        ;;
+    aarch64-cortex-a53-ipk)
+        sdk_release=24.10.5
+        sdk_target=mediatek/filogic
+        sdk_gcc=13.3.0
+        pkg_arch=aarch64_cortex-a53
+        pkg_ext=ipk
+        # https://downloads.openwrt.org/releases/24.10.5/targets/mediatek/filogic/sha256sums
+        sdk_sha256=0fa98c542ee07f1423ebcdce19aed464bc7f8008ef2cbe83cb723ec694ed8c56
         base_rev=4f7e6e554be2aef6a55be36f9f954d56705eb2ee
         packages_rev=953b6d47b4e9f0ad3c39547c6d3f9a828f10e206
         luci_rev=d88390be4ec9722cb427fee03368fc8c8582627d
@@ -184,6 +197,45 @@ PY
     readelf -h "$work/apk-contents/usr/sbin/meshd" >"$work/meshd.elf"
     grep -Eq 'Machine:[[:space:]]+AArch64$' "$work/meshd.elf" || fail 'meshd is not an AArch64 ELF'
     grep -Fxq '/etc/config/meshd' "$work/apk-contents/lib/apk/packages/meshd.conffiles" || fail 'APK did not preserve meshd configuration'
+    python3 - "$work/meshd.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+deps = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))['info'].get('depends', [])
+print('Runtime dependencies (must already exist on the device): ' + ', '.join(deps))
+PY
+else
+    python3 - "${meshd[0]}" "${luci[0]}" <<'PY'
+import gzip
+import io
+import sys
+import tarfile
+from pathlib import Path
+
+
+def control(path):
+    raw = Path(path).read_bytes()
+    # OpenWrt ships IPKs as an ar archive or, on some releases, a gzipped tar.
+    if raw[:2] == b'\x1f\x8b':
+        outer = gzip.decompress(raw)
+    elif raw[:8] == b'!<arch>\n':
+        raise SystemExit(f'{path}: unsupported ar IPK layout')
+    else:
+        raise SystemExit(f'{path}: unknown container')
+    with tarfile.open(fileobj=io.BytesIO(outer)) as archive:
+        member = next(n for n in archive.getnames() if 'control.tar' in n)
+        inner = archive.extractfile(member).read()
+    with tarfile.open(fileobj=io.BytesIO(inner), mode='r:*') as archive:
+        name = next(n for n in archive.getnames() if n.endswith('/control'))
+        return archive.extractfile(name).read().decode('utf-8', 'replace')
+
+
+for path in sys.argv[1:]:
+    for line in control(path).splitlines():
+        if line.startswith('Depends:'):
+            print(f'{Path(path).name} -> {line[len("Depends:"):].strip()}')
+PY
 fi
 
 if [[ ${SDK_WIFI_TEST:-0} == 1 ]]; then
