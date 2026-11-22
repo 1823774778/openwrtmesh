@@ -187,7 +187,9 @@ from pathlib import Path
 
 for filename, name, arch, required in (
     (sys.argv[1], 'wifiroam', sys.argv[3], ('ucode', 'libnetfilter-queue')),
-    (sys.argv[2], 'luci-app-wifiroam', 'noarch', ('wifiroam', 'luci-base')),
+    # APK LuCI recipes depend on wifiroam (+libc); luci-base is provided by the image,
+    # not an explicit package dependency, so do not require it here.
+    (sys.argv[2], 'luci-app-wifiroam', 'noarch', ('wifiroam',)),
 ):
     pkg = json.loads(Path(filename).read_text(encoding='utf-8'))['info']
     if (pkg['name'], pkg['arch']) != (name, arch):
