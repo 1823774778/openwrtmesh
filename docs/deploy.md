@@ -36,6 +36,14 @@ apk add --allow-untrusted /tmp/meshd-0.1.0-r2.apk /tmp/luci-app-meshd-0.1.0-r1.a
 
 Actions 的两个 APK 是未签名的独立构建包；仅在核对下载来源和摘要后，对这条安装命令临时使用 `--allow-untrusted`。不要关闭软件源的签名验证；生产环境建议使用自己的签名包源。如果使用后续版本，把命令里的文件名换成实际下载的文件名。
 
+APK 记录的是构建时 SDK 的库 ABI 名（例如 `libubox20260213`、`libubus20251202`），必须与设备已安装的库完全一致；否则 `apk` 会报 `no such package`，这属于固件版本不匹配，不要用 `--force-*` 绕过。先在设备上运行只读诊断并把输出贴到 Issue：
+
+```sh
+sh scripts/check-device.sh
+```
+
+脚本只打印固件版本、架构、已装库 ABI、wpad 变体和软件源。若设备不是构建所用的 25.12.6 `mediatek/filogic`，请用该设备对应版本的 SDK 重编，或先升级到 25.12.6 官方固件。
+
 **OpenWrt 24.10.5 / x86/64 / `x86_64`（IPK）：**
 
 ```sh
@@ -130,5 +138,6 @@ ubus call meshd status
 | 无候选 | 同一二层管理 VLAN、候选 `role=candidate`、UDP 防火墙、两边 `net_name`；可以人工核对并直接填指纹 |
 | 授权过仍离线 | 节点是否切换 `node`、网关 pin、TCP 41008、CA/叶有效期和 EKU、两端时钟；看管理网络而不是业务网访问 |
 | 提交失败或回退 | `ubus call meshd diagnose`、`config_status`、`event_log` 和 `hostapd.<ifname> get_status`；检查 wpad、所选 AP、未提交 LuCI 编辑、DFS、是否误选回程 AP |
+| `apk` 报 `libubox…/libubus… (no such package)` | 包绑定的库 ABI 与设备固件不一致。运行 `sh scripts/check-device.sh` 对比固件版本、架构与已装库；用匹配版本 SDK 重编或升级固件，不要 `--force-*` |
 | 一部分节点不更新 | `rollout` 是否暂停，比较各版本、失败标记、已知无线配置漂移；通过有线逐台修复，不要删除版本文件逃过校验 |
 | 版本对但客户端不漫游 | 客户端决定是否漫游；检查 SSID、加密/密码、频道覆盖、r 兼容性并重做实际终端连接测试 |
