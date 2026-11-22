@@ -14,16 +14,18 @@ VIEW_ROOT = LUCI / "htdocs/luci-static/resources/view"
 VIEWS = VIEW_ROOT / "wifiroam"
 COMMON = LUCI / "htdocs/luci-static/resources/wifiroam/common.js"
 
-# The 31 methods published by wifiroamd.uc api_obj and granted by ACL.
+# The 39 methods published by wifiroamd.uc api_obj and granted by ACL.
 READ = {
     "status", "topology", "client_detail", "get_roam", "precheck", "discover",
     "roam_log", "get_backhaul", "appctl_status", "offload_status", "get_wifi", "get_guest",
     "device_history", "ban_list",
+    "config_export", "wifi_schedule_get", "dhcp_static_list", "health_score",
 }
 WRITE = {
     "set_alias", "set_role", "set_roam", "set_backhaul", "pair", "unpair",
     "set_appctl", "set_app_policy", "set_offload", "set_wifi", "set_guest",
     "set_pin", "ungroup_device", "wake", "set_ban", "ban_set", "ban_del",
+    "config_import", "wifi_schedule_set", "dhcp_static_set", "dhcp_static_del",
 }
 ALL_METHODS = READ | WRITE
 
@@ -45,12 +47,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(entry["read"]["ubus"]["wifiroam"]), len(READ))
         self.assertEqual(len(entry["write"]["ubus"]["wifiroam"]), len(WRITE))
 
-    def test_menu_resolves_to_four_views(self):
+    def test_menu_resolves_to_five_views(self):
         menu = json.loads(MENU.read_text(encoding="utf-8"))
         parent = menu["admin/wifiroam"]
         self.assertIn("luci-app-wifiroam", parent["depends"]["acl"])
         views = {e["action"]["path"] for e in menu.values() if e["action"]["type"] == "view"}
-        self.assertEqual(len(views), 4)
+        self.assertEqual(len(views), 5)
         for view in views:
             with self.subTest(view=view):
                 self.assertTrue((VIEW_ROOT / f"{view}.js").is_file())

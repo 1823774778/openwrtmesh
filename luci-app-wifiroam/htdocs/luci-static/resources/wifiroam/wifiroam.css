@@ -1236,3 +1236,38 @@ body.wr-dark .wr-app .wr-node .wr-sub { fill: var(--wr-d-dim); }
     .wr-app .wr-statusbar .wr-item { flex: 1 1 45%; }
     .wr-hero { padding: 1em 1em 0; }
 }
+
+/* ==================================================================== */
+/* Toolbox: health score / Wi-Fi schedule / DHCP leases / backup          */
+/* ==================================================================== */
+.wr-health-row { display: flex; align-items: center; gap: 1.2em; margin-bottom: 0.9em; flex-wrap: wrap; }
+.wr-hc-ring {
+    width: 92px; height: 92px; flex: none; border-radius: 50%;
+    border: 7px solid #888; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; line-height: 1.1;
+    background: rgba(255,255,255,.03);
+}
+.wr-hc-num { font-size: 1.9em; font-weight: 600; color: #fff; }
+.wr-hc-unit { font-size: .75em; color: #6f829b; }
+.wr-health-meta { flex: 1 1 180px; }
+.wr-hc-grade { font-size: 1.25em; font-weight: 600; }
+.wr-hc-checks { display: flex; flex-direction: column; gap: .35em; }
+.wr-hc-item { display: flex; align-items: center; gap: .6em; padding: .45em .7em; border-radius: 8px; background: rgba(255,255,255,.03); font-size: .9em; }
+.wr-hc-ico { flex: none; width: 1.4em; height: 1.4em; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; color: #0d1420; }
+.wr-hc-ok .wr-hc-ico { background: #35c98a; }
+.wr-hc-warn .wr-hc-ico { background: #ffb547; }
+.wr-hc-fail .wr-hc-ico { background: #ff6b6b; }
+.wr-hc-info .wr-hc-ico { background: #4f9dff; }
+.wr-hc-label { color: #e7eef8; font-weight: 500; flex: 0 0 9em; }
+.wr-hc-detail { color: #9fb0c6; word-break: break-all; }
+
+.wr-wd-picker { display: flex; gap: .7em; flex-wrap: wrap; }
+.wr-wd-label { display: inline-flex; align-items: center; gap: .25em; color: #9fb0c6; font-weight: normal; white-space: nowrap; }
+
+.wr-dhcp-list { display: flex; flex-direction: column; gap: .3em; margin-bottom: .8em; }
+.wr-dhcp-row { display: flex; align-items: center; gap: .8em; padding: .5em .7em; border-radius: 8px; background: rgba(255,255,255,.03); border: 1px solid #2a3a50; flex-wrap: wrap; }
+.wr-dhcp-mac { font-family: monospace; color: #4f9dff; flex: 0 0 auto; }
+.wr-dhcp-ip { font-family: monospace; color: #e7eef8; font-weight: 600; }
+.wr-dhcp-name { color: #9fb0c6; flex: 1 1 auto; }
+.wr-dhcp-add { display: flex; gap: .5em; flex-wrap: wrap; align-items: center; margin-top: .5em; }
+.wr-dhcp-add input[type="text"] { min-width: 8em; }

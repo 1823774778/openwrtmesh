@@ -49,7 +49,7 @@ const GUEST_DEFAULT_SSID = "Guest";
 const GUEST_SEC_PREFIX = "wifiroam_guest_";
 const GUEST_NFT_TABLE = "wifiroam_guest";
 // 协议/行为版本：LuCI 侧要求一致，不一致时「重启」会自动 stop+start 修复
-const DAEMON_VERSION = 5;
+const DAEMON_VERSION = 6;
 // v5 additions: device history / timed ban / WoL
 const DEVICES_MAX = 512;
 const BAN_NFT_FILE = "/tmp/wifiroam-ban.nft";
@@ -214,6 +214,7 @@ let state = {
 	dev_dirty: false, dev_saved: 0,
 	ban: { enabled: false, list: [], sig: "", active: {} },
 	bcast: "255.255.255.255",
+	ws_open: null,      // Wi-Fi 定时：上次主网络开/关状态（null = 启动时对齐）
 	link: null,         // SAP: outgoing channel to CAP {sock,chan,authed}
 	cap_learned: null,  // CAP ip learned from hello
 	events: [],         // ring buffer
@@ -784,6 +785,232 @@ function ban_tick() {
 	if (state.cfg.role != "cap") return;
 	ban_apply(false);
 }
+
+// ==================================================================== v6 features
+// 新功能：配置备份/恢复、Wi-Fi 定时开关、DHCP 静态租约、网络健康评分。
+
+// ---------- 1) 配置备份与恢复 ----------
+const WR_CONFIG_TYPES = [ "globals", "roam", "backhaul", "guest", "alias_sync", "appctl", "schedule", "wifisched", "ban", "appdev" ];
+function wr_config_export() {
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	let sections = [];
+	for (let typ in WR_CONFIG_TYPES) {
+		cur.foreach("wifiroam", typ, function(s) {
+			let one = {};
+			for (let k, v in s) {
+				if (substr(k, 0, 1) == ".") continue;
+				one[k] = v;
+			}
+			push(sections, { type: s[".type"], name: s[".name"], anonymous: s[".anonymous"] == true, values: one });
+		});
+	}
+	let aliases = {};
+	let devices = {};
+	try { aliases = json(fs.readfile(ALIAS_PATH)) ?? {}; } catch (e) {}
+	try { devices = json(fs.readfile(DEVICES_PATH())) ?? {}; } catch (e) {}
+	return {
+		format: "wifiroam-backup", version: 1, created: time(),
+		sections: sections, aliases: aliases, devices: devices,
+	};
+}
+
+function wr_config_import(data) {
+	if (type(data) != "object") return { ok: false, error: "invalid_data" };
+	if (data.format != "wifiroam-backup") return { ok: false, error: "bad_format" };
+	if (int(data.version ?? 0) != 1) return { ok: false, error: "bad_version" };
+	if (type(data.sections) != "array") return { ok: false, error: "invalid_data" };
+
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	// 删除现有 wifiroam 的所有 section，再按备份重建
+	let olds = [];
+	for (let typ in WR_CONFIG_TYPES) {
+		cur.foreach("wifiroam", typ, function(s) { push(olds, s[".name"]); });
+	}
+	for (let sid in olds) cur.delete("wifiroam", sid);
+	for (let s in data.sections) {
+		let t = s.type ?? "";
+		if (t == "") continue;
+		let sid = cur.add("wifiroam", t);
+		for (let k, v in (s.values ?? {}))
+			cur.set("wifiroam", sid, k, v);
+	}
+	if (!cur.commit("wifiroam")) return { ok: false, error: "commit_failed" };
+
+	if (type(data.aliases) == "object") {
+		try {
+			fs.mkdir(ALIAS_DIR);
+			fs.writefile(ALIAS_PATH, sprintf("%.J", data.aliases));
+		} catch (e) { return { ok: false, error: "alias_write_failed" }; }
+	}
+	if (type(data.devices) == "object") {
+		try { fs.writefile(DEVICES_PATH(), sprintf("%.J", data.devices)); }
+		catch (e) { /* 历史表失败不致命 */ }
+	}
+	load_config();
+	alias_load();
+	ban_load();
+	reconfigure();
+	return { ok: true, sections: length(data.sections) };
+}
+
+// ---------- 2) Wi-Fi 定时开关 ----------
+const WS_SECTION = "wifisched";
+function wifi_sched_cfg() {
+	let cur = uci.cursor();
+	cur.load("wifiroam");
+	return {
+		enabled: cur.get("wifiroam", WS_SECTION, "enabled") == "1",
+		start: cur.get("wifiroam", WS_SECTION, "start") ?? "08:00",
+		end: cur.get("wifiroam", WS_SECTION, "end") ?? "23:00",
+		weekdays: ban_weekdays(cur.get("wifiroam", WS_SECTION, "weekdays") ?? ""),
+	};
+}
+function wifi_sched_open(c) {
+	if (!c.enabled) return true;
+	if (!length(c.weekdays)) return true;
+	let lt = ban_localtime();
+	let wd = lt.wday == 0 ? 7 : lt.wday;
+	if (index(c.weekdays, wd) < 0) return false;
+	let a = hhmm_minutes(c.start), b = hhmm_minutes(c.end);
+	if (a == null || b == null) return true;
+	let t = lt.hour * 60 + lt.min;
+	if (a <= b) return t >= a && t < b;
+	return t >= a || t < b;
+}
+function wifi_sched_apply() {
+	if (state.cfg.role == "unconfigured") return;
+	let c = wifi_sched_cfg();
+	let open = wifi_sched_open(c);
+	if (state.ws_open == null) { state.ws_open = open; return; }
+	if (open == state.ws_open) return;
+	state.ws_open = open;
+	let cur = uci.cursor();
+	cur.load("wireless");
+	let changed = false;
+	cur.foreach("wireless", "wifi-iface", function(s) {
+		if (s.mode && s.mode != "ap") return;
+		if (s.wifiroam_guest == "1") return;
+		let sid = s[".name"];
+		cur.set("wireless", sid, "disabled", open ? "0" : "1");
+		changed = true;
+	});
+	if (!changed) return;
+	cur.commit("wireless");
+	uloop.process("/sbin/wifi", [ "reload" ], null,
+		function(res) { log("wifi schedule reload rc=" + res); });
+	push_event("wifi_schedule", "", open ? "opened" : "closed");
+}
+
+// ---------- 3) DHCP 静态租约 ----------
+function dhcp_static_list() {
+	let cur = uci.cursor();
+	cur.load("dhcp");
+	let out = [];
+	cur.foreach("dhcp", "host", function(s) {
+		let mac = lc(s.mac ?? "");
+		if (length(macnorm(mac)) != 12) return;
+		push(out, {
+			mac: maccolon(mac), ip: s.ip ?? "", name: s.name ?? "",
+			section: s[".name"],
+		});
+	});
+	out = sort_by(out, function(a, b) { return a.ip < b.ip ? -1 : (a.ip > b.ip ? 1 : 0); });
+	return { reservations: out };
+}
+function dhcp_static_set(mac, ip, name) {
+	let mn = macnorm(mac);
+	if (length(mn) != 12) return { ok: false, error: "invalid_mac" };
+	// 简单 IPv4 校验：四段 0-255
+	let parts = split(trim(ip ?? ""), ".");
+	if (length(parts) != 4) return { ok: false, error: "invalid_ip" };
+	for (let p in parts)
+		if (int(p) < 0 || int(p) > 255) return { ok: false, error: "invalid_ip" };
+	let cur = uci.cursor();
+	cur.load("dhcp");
+	let sid = null;
+	cur.foreach("dhcp", "host", function(s) {
+		if (macnorm(s.mac ?? "") == mn) sid = s[".name"];
+	});
+	if (sid == null) sid = cur.add("dhcp", "host");
+	cur.set("dhcp", sid, "mac", maccolon(mn));
+	cur.set("dhcp", sid, "ip", trim(ip));
+	cur.set("dhcp", sid, "name", trim(name ?? "") != "" ? trim(name) : ("host-" + substr(mn, 0, 6)));
+	if (!cur.commit("dhcp")) return { ok: false, error: "commit_failed" };
+	uloop.process("/etc/init.d/dnsmasq", [ "restart" ], null,
+		function(res) { log("dnsmasq restart rc=" + res); });
+	return { ok: true, mac: maccolon(mn), ip: trim(ip) };
+}
+function dhcp_static_del(mac) {
+	let mn = macnorm(mac);
+	if (length(mn) != 12) return { ok: false, error: "invalid_mac" };
+	let cur = uci.cursor();
+	cur.load("dhcp");
+	let sids = [];
+	cur.foreach("dhcp", "host", function(s) {
+		if (macnorm(s.mac ?? "") == mn) push(sids, s[".name"]);
+	});
+	if (!length(sids)) return { ok: false, error: "not_found" };
+	for (let sid in sids) cur.delete("dhcp", sid);
+	if (!cur.commit("dhcp")) return { ok: false, error: "commit_failed" };
+	uloop.process("/etc/init.d/dnsmasq", [ "restart" ], null,
+		function(res) { log("dnsmasq restart rc=" + res); });
+	return { ok: true };
+}
+
+// ---------- 4) 网络健康评分 ----------
+function health_score() {
+	let now = time();
+	let checks = [];
+	let score = 100;
+	// 角色已配置
+	if (state.cfg.role == "unconfigured") {
+		push(checks, { id: "role", status: "warn", label: "未配置角色", detail: "请先在无线设置中设为主路由或从路由" });
+		score -= 30;
+	} else {
+		push(checks, { id: "role", status: "ok", label: "角色已配置", detail: state.cfg.role });
+	}
+	// 控制传输在线（CAP 有对等节点，SAP 有链路）
+	let peers_on = 0, peers_total = 0;
+	for (let mn, p in state.peers) { peers_total++; if (p.authed) peers_on++; }
+	if (state.cfg.role == "cap") {
+		if (peers_total > 0) {
+			let ratio = peers_on * 100 / peers_total;
+			if (ratio >= 100) push(checks, { id: "peers", status: "ok", label: "节点全部在线", detail: sprintf("%d/%d", peers_on, peers_total) });
+			else { push(checks, { id: "peers", status: "warn", label: "部分节点离线", detail: sprintf("%d/%d", peers_on, peers_total) }); score -= 15; }
+		} else {
+			push(checks, { id: "peers", status: "info", label: "单节点网络", detail: "尚未配对从路由" });
+		}
+	} else if (state.cfg.role == "sap") {
+		if (state.link?.authed) push(checks, { id: "link", status: "ok", label: "已连接主路由", detail: "" });
+		else { push(checks, { id: "link", status: "fail", label: "未连接主路由", detail: "" }); score -= 25; }
+	}
+	// 漫游配置
+	let roam = current_roam_cfg();
+	if (roam.enabled && (roam.k_neighbor || roam.k_beacon || roam.v_bss_transition || roam.ieee80211r)) {
+		push(checks, { id: "roam", status: "ok", label: "无缝漫游已启用", detail: "" });
+	} else {
+		push(checks, { id: "roam", status: "warn", label: "无缝漫游未启用", detail: "" });
+		score -= 10;
+	}
+	// 客户端在线
+	let nclients = length(keys(local_clients()));
+	for (let mn, p in state.peers) if (p.authed) nclients += length(keys(p.clients ?? {}));
+	push(checks, { id: "clients", status: "info", label: "在线终端", detail: "" + nclients });
+	// Wi-Fi 定时状态
+	let ws = wifi_sched_cfg();
+	if (ws.enabled)
+		push(checks, { id: "wifisched", status: "info", label: "Wi-Fi 定时已启用", detail: ws.start + "-" + ws.end });
+	// 设备历史
+	let ndev = length(keys(state.devices));
+	push(checks, { id: "devices", status: "info", label: "已知设备", detail: "" + ndev });
+	if (score < 0) score = 0;
+	let grade = score >= 90 ? "excellent" : (score >= 70 ? "good" : (score >= 40 ? "fair" : "poor"));
+	return { score: score, grade: grade, role: state.cfg.role, checks: checks, time: now };
+}
+
+// ==================================================================== end v6 features
 
 // ==================================================================== end v5 additions
 
@@ -4529,6 +4756,77 @@ let api_obj = {
 			return { ok: true };
 		},
 	},
+	config_export: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) { return wr_config_export(); },
+	},
+	config_import: {
+		args: { ubus_rpc_session: "", data: "" },
+		call: function(req) {
+			let raw = req.args.data ?? "";
+			if (raw == "" || type(raw) != "string") return { ok: false, error: "invalid_data" };
+			let data = null;
+			try { data = json(raw); } catch (e) { return { ok: false, error: "invalid_json" }; }
+			if (type(data) != "object") return { ok: false, error: "invalid_data" };
+			return wr_config_import(data);
+		},
+	},
+	wifi_schedule_get: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) {
+			let c = wifi_sched_cfg();
+			return {
+				enabled: c.enabled, start: c.start, end: c.end,
+				weekdays: c.weekdays, open: wifi_sched_open(c),
+			};
+		},
+	},
+	wifi_schedule_set: {
+		args: { ubus_rpc_session: "", enabled: false, start: "", end: "", weekdays: "" },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let a = req.args;
+			let start = trim(a.start ?? "08:00"), end = trim(a.end ?? "23:00");
+			if (hhmm_minutes(start) == null || hhmm_minutes(end) == null)
+				return { ok: false, error: "invalid_time" };
+			let days = ban_weekdays(a.weekdays);
+			let cur = uci.cursor();
+			cur.load("wifiroam");
+			if (cur.get("wifiroam", WS_SECTION) == null)
+				cur.set("wifiroam", WS_SECTION, WS_SECTION);
+			cur.set("wifiroam", WS_SECTION, "enabled", a.enabled ? "1" : "0");
+			cur.set("wifiroam", WS_SECTION, "start", start);
+			cur.set("wifiroam", WS_SECTION, "end", end);
+			cur.set("wifiroam", WS_SECTION, "weekdays", join(" ", sort(days)));
+			if (!cur.commit("wifiroam")) return { ok: false, error: "commit_failed" };
+			state.ws_open = null;
+			wifi_sched_apply();
+			return { ok: true, enabled: a.enabled ? true : false };
+		},
+	},
+	dhcp_static_list: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) { return dhcp_static_list(); },
+	},
+	dhcp_static_set: {
+		args: { ubus_rpc_session: "", mac: "", ip: "", name: "" },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			let a = req.args;
+			return dhcp_static_set(a.mac ?? "", a.ip ?? "", a.name ?? "");
+		},
+	},
+	dhcp_static_del: {
+		args: { ubus_rpc_session: "", mac: "" },
+		call: function(req) {
+			if (state.cfg.role != "cap") return { ok: false, error: "not_cap" };
+			return dhcp_static_del(req.args.mac ?? "");
+		},
+	},
+	health_score: {
+		args: { ubus_rpc_session: "" },
+		call: function(req) { return health_score(); },
+	},
 };
 
 // ------------------------------------------------------- RSSI steering (11v)
@@ -4651,6 +4949,7 @@ function main() {
 	// 建规则要用到本机接口/网桥信息，必须放在 detect_self 之后
 	appctl_load();
 	ban_load();
+	wifi_sched_apply();
 	ensure_token();
 	// 首次启用插件：按默认设置开启漫游（自动选中本机 SSID）
 	roam_default_init();
@@ -4670,6 +4969,7 @@ function main() {
 	uloop.interval(TICK_INTERVAL, appctl_tick);
 	uloop.interval(TICK_INTERVAL, devlist_tick);
 	uloop.interval(TICK_INTERVAL, ban_tick);
+	uloop.interval(TICK_INTERVAL, wifi_sched_apply);
 	uloop.interval(TICK_INTERVAL, function() {
 		if (state.cfg.role != "cap") return;
 		let cur = local_clients();

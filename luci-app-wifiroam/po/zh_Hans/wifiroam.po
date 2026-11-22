@@ -877,3 +877,118 @@ msgstr "应用识别只能在主路由（CAP）上配置。"
 
 msgid "Enable \"App Usage & Access Control\" on the Clients page first."
 msgstr "请先在「设备」页开启「应用使用与访问控制」。"
+
+msgid "Active days"
+msgstr "生效星期"
+
+msgid "Add reservation"
+msgstr "添加保留"
+
+msgid "Added"
+msgstr "已添加"
+
+msgid "Applied"
+msgstr "已生效"
+
+msgid "Backup contains all wifiroam settings, device aliases and history. Restore overwrites the current configuration."
+msgstr "备份包含全部 wifiroam 设置、设备别名与历史记录。恢复会覆盖当前配置。"
+
+msgid "Backup downloaded"
+msgstr "备份已下载"
+
+msgid "Choose a backup file first"
+msgstr "请先选择备份文件"
+
+msgid "Computed from node status, roaming config and known devices."
+msgstr "根据节点状态、漫游配置和已知设备综合计算。"
+
+msgid "Configuration Backup"
+msgstr "配置备份"
+
+msgid "Current state"
+msgstr "当前状态"
+
+msgid "DHCP Static Leases"
+msgstr "DHCP 静态租约"
+
+msgid "Delete"
+msgstr "删除"
+
+msgid "Download backup"
+msgstr "下载备份"
+
+msgid "Enable scheduled on/off"
+msgstr "启用定时开关"
+
+msgid "Excellent"
+msgstr "优秀"
+
+msgid "Fair"
+msgstr "一般"
+
+msgid "Fri"
+msgstr "周五"
+
+msgid "Good"
+msgstr "良好"
+
+msgid "Mon"
+msgstr "周一"
+
+msgid "Network Health"
+msgstr "网络健康"
+
+msgid "No static leases yet."
+msgstr "暂无静态租约"
+
+msgid "Off"
+msgstr "关"
+
+msgid "Off time"
+msgstr "关闭时间"
+
+msgid "On"
+msgstr "开"
+
+msgid "On time"
+msgstr "开启时间"
+
+msgid "Outside the active window the main Wi-Fi SSIDs are disabled until the next window."
+msgstr "在生效时段之外，主网络 Wi-Fi 将被关闭，直到下一个时段自动开启。"
+
+msgid "Poor"
+msgstr "较差"
+
+msgid "Removed"
+msgstr "已删除"
+
+msgid "Reservations assign a fixed IP to a device. dnsmasq restarts after each change."
+msgstr "静态租约为设备分配固定 IP，每次修改后 dnsmasq 会重启。"
+
+msgid "Restore backup"
+msgstr "恢复备份"
+
+msgid "Restored. The page will reload."
+msgstr "已恢复，页面即将重新加载。"
+
+msgid "Sat"
+msgstr "周六"
+
+msgid "Sun"
+msgstr "周日"
+
+msgid "Thu"
+msgstr "周四"
+
+msgid "Toolbox"
+msgstr "工具箱"
+
+msgid "Tue"
+msgstr "周二"
+
+msgid "Wed"
+msgstr "周三"
+
+msgid "Wi-Fi Schedule"
+msgstr "Wi-Fi 定时"
+

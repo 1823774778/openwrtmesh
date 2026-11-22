@@ -20,7 +20,7 @@ var callServiceList = rpc.declare({
 });
 var callRcList = rpc.declare({ object: 'rc', method: 'list', expect: { '': {} } });
 var callRcInit = rpc.declare({ object: 'rc', method: 'init', params: ['name', 'action'] });
-var REQUIRED_VERSION = 5;
+var REQUIRED_VERSION = 6;
 return view.extend({
     pre: undefined,
     st: null,

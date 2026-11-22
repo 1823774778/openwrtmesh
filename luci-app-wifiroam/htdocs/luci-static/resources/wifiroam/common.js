@@ -17,7 +17,7 @@ return baseclass.extend({
             href: L.resource('wifiroam/wifiroam.css') + '?v=' + this.CSS_VER,
         });
     },
-    CSS_VER: '20261122b',
+    CSS_VER: '20261122c',
     isDark: function () {
         // wifiroam 统一采用深色卡片式界面，不跟随 LuCI 明暗主题切换。
         return true;
@@ -825,12 +825,14 @@ return baseclass.extend({
             { key: 'clients', title: _('Clients'), url: 'admin/wifiroam/clients' },
             { key: 'settings', title: _('Wireless Settings'), url: 'admin/wifiroam/settings' },
             { key: 'advanced', title: _('Advanced Settings'), url: 'admin/wifiroam/advanced' },
+            { key: 'toolbox', title: _('Toolbox'), url: 'admin/wifiroam/toolbox' },
         ];
         var icons = {
             topology: 'M4 16l4-6 4 4 4-8 4 6',
             clients: 'M4 6h16v12H4z',
             settings: 'M2 8.5C4 5 6 5 8 8.5S12 12 14 8.5 18 5 22 8.5',
             advanced: 'M4 6h16 M4 12h16 M4 18h16',
+            toolbox: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.3-3.3-3-3-3.3 3.3zM3 21l3.9-1 12-12-2.9-2.9-12 12L3 21z',
         };
         var tabs = nav.map(function (n) {
             return E('a', {
