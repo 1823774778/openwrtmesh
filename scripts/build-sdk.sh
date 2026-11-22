@@ -7,12 +7,12 @@ umask 022
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf 'Usage: bash scripts/build-sdk.sh [x86-64-ipk|aarch64-cortex-a53-ipk|aarch64-cortex-a53-apk]\n\n'
+    printf 'Build the wifiroam daemon and its LuCI plugin with a release-pinned OpenWrt SDK.\n\n'
     printf 'Default: x86-64-ipk (OpenWrt 24.10.5 x86/64, IPK).\n'
     printf 'aarch64-cortex-a53-ipk: OpenWrt 24.10.5 mediatek/filogic (IPK).\n'
     printf 'aarch64-cortex-a53-apk: OpenWrt 25.12.6 mediatek/filogic (APK).\n'
     printf 'Both SDKs require a Linux x86_64 host, a non-root user, and the OpenWrt SDK host tools.\n'
     printf 'Optional: SDK_CACHE_DIR, SDK_OUTPUT_DIR, SDK_JOBS, SDK_VERBOSE=s, SDK_KEEP_WORK=1.\n'
-    printf 'SDK_WIFI_TEST=1 runs isolated Wi-Fi fixtures with the x86/64 SDK (requires sudo).\n'
     exit 0
 fi
 
@@ -66,12 +66,9 @@ esac
 for tool in curl git make gcc g++ perl python3 readelf rsync sha256sum tar zstd; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing host tool: $tool"
 done
-if [[ ${SDK_WIFI_TEST:-0} == 1 && $profile != x86-64-ipk ]]; then
-    fail 'SDK_WIFI_TEST uses the x86/64 SDK to execute on the Linux x86_64 host'
-fi
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-[[ -f $repo/package/meshd/Makefile && -f $repo/luci-app-meshd/Makefile ]] || fail 'both package Makefiles are required'
+[[ -f $repo/package/wifiroam/Makefile && -f $repo/luci-app-wifiroam/Makefile ]] || fail 'both wifiroam package Makefiles are required'
 
 sdk_name="openwrt-sdk-$sdk_release-${sdk_target/\//-}_gcc-${sdk_gcc}_musl.Linux-x86_64"
 sdk_archive="$sdk_name.tar.zst"
@@ -110,8 +107,8 @@ fi
 verify_sdk "$archive" || fail "invalid cached SDK; remove $archive and retry"
 tar --zstd -xf "$archive" -C "$work"
 sdk="$work/$sdk_name"
-cp -a -- "$repo/package/meshd" "$sdk/package/meshd"
-cp -a -- "$repo/luci-app-meshd" "$sdk/package/luci-app-meshd"
+cp -a -- "$repo/package/wifiroam" "$sdk/package/wifiroam"
+cp -a -- "$repo/luci-app-wifiroam" "$sdk/package/luci-app-wifiroam"
 
 (
     cd -- "$sdk"
@@ -133,14 +130,18 @@ FEEDS
     done < feeds.conf
     ./scripts/feeds update -i base packages luci
     # Install selected recipes and their dependencies, not all release feeds.
-    ./scripts/feeds install libubox libubus libuci libblobmsg-json libmbedtls luci-base
+    # wifiroam needs the ucode runtime modules plus the netfilter queue libs.
+    ./scripts/feeds install \
+        ucode ucode-mod-ubus ucode-mod-uloop ucode-mod-socket \
+        ucode-mod-fs ucode-mod-uci ucode-mod-digest \
+        libnetfilter-queue libmnl libnfnetlink luci-base
 
     cat > .config <<'CONFIG'
 # CONFIG_ALL is not set
 # CONFIG_ALL_NONSHARED is not set
 # CONFIG_ALL_KMODS is not set
-CONFIG_PACKAGE_meshd=m
-CONFIG_PACKAGE_luci-app-meshd=m
+CONFIG_PACKAGE_wifiroam=m
+CONFIG_PACKAGE_luci-app-wifiroam=m
 CONFIG
     make defconfig
     grep -Fxq "CONFIG_TARGET_ARCH_PACKAGES=\"$pkg_arch\"" .config || fail "SDK target is not $pkg_arch"
@@ -149,39 +150,44 @@ CONFIG
     else
         if grep -Fxq 'CONFIG_USE_APK=y' .config; then fail 'SDK is not configured for IPK packages'; fi
     fi
-    for pkg in meshd luci-app-meshd libubox libubus libuci libblobmsg-json libmbedtls luci-base; do
+    for pkg in wifiroam luci-app-wifiroam ucode ucode-mod-ubus ucode-mod-uloop \
+               ucode-mod-socket ucode-mod-fs ucode-mod-uci ucode-mod-digest luci-base; do
         grep -Eq "^CONFIG_PACKAGE_${pkg}=[my]$" .config || fail "SDK configuration excluded $pkg"
     done
 
-    make -j"$jobs" V="${SDK_VERBOSE:-}" package/meshd/compile
-    make -j"$jobs" V="${SDK_VERBOSE:-}" package/luci-app-meshd/compile
+    # Build the DPI library dependencies into staging_dir first, then the packages.
+    for dep in libmnl libnfnetlink libnetfilter-queue; do
+        make -j"$jobs" V="${SDK_VERBOSE:-}" "package/$dep/compile"
+    done
+    make -j"$jobs" V="${SDK_VERBOSE:-}" package/wifiroam/compile
+    make -j"$jobs" V="${SDK_VERBOSE:-}" package/luci-app-wifiroam/compile
 )
 
 shopt -s globstar nullglob
 if [[ $pkg_ext == apk ]]; then
-    meshd=("$sdk"/bin/**/meshd-[0-9]*.apk)
-    luci=("$sdk"/bin/**/luci-app-meshd-[0-9]*.apk)
+    daemon_pkg=("$sdk"/bin/**/wifiroam-[0-9]*.apk)
+    luci=("$sdk"/bin/**/luci-app-wifiroam-[0-9]*.apk)
 else
-    meshd=("$sdk"/bin/**/meshd_*_"$pkg_arch".ipk)
-    luci=("$sdk"/bin/**/luci-app-meshd_*_all.ipk)
+    daemon_pkg=("$sdk"/bin/**/wifiroam_*_"$pkg_arch".ipk)
+    luci=("$sdk"/bin/**/luci-app-wifiroam_*_all.ipk)
 fi
-[[ ${#meshd[@]} == 1 && -s ${meshd[0]} ]] || fail "expected exactly one nonempty $pkg_arch meshd $pkg_ext"
+[[ ${#daemon_pkg[@]} == 1 && -s ${daemon_pkg[0]} ]] || fail "expected exactly one nonempty $pkg_arch wifiroam $pkg_ext"
 [[ ${#luci[@]} == 1 && -s ${luci[0]} ]] || fail "expected exactly one nonempty architecture-independent LuCI $pkg_ext"
 
 if [[ $pkg_ext == apk ]]; then
     apk="$sdk/staging_dir/host/bin/apk"
     [[ -x $apk ]] || fail 'SDK APK tool is missing'
-    "$apk" adbdump --format json "${meshd[0]}" >"$work/meshd.json"
+    "$apk" adbdump --format json "${daemon_pkg[0]}" >"$work/wifiroam.json"
     "$apk" adbdump --format json "${luci[0]}" >"$work/luci.json"
-    python3 - "$work/meshd.json" "$work/luci.json" "$pkg_arch" <<'PY'
+    python3 - "$work/wifiroam.json" "$work/luci.json" "$pkg_arch" <<'PY'
 import json
 import re
 import sys
 from pathlib import Path
 
 for filename, name, arch, required in (
-    (sys.argv[1], 'meshd', sys.argv[3], ('libubus', 'libubox', 'libblobmsg-json', 'libuci', 'libmbedtls')),
-    (sys.argv[2], 'luci-app-meshd', 'noarch', ('meshd', 'luci-base')),
+    (sys.argv[1], 'wifiroam', sys.argv[3], ('ucode', 'libnetfilter-queue')),
+    (sys.argv[2], 'luci-app-wifiroam', 'noarch', ('wifiroam', 'luci-base')),
 ):
     pkg = json.loads(Path(filename).read_text(encoding='utf-8'))['info']
     if (pkg['name'], pkg['arch']) != (name, arch):
@@ -193,11 +199,12 @@ for filename, name, arch, required in (
 PY
     mkdir -- "$work/apk-contents"
     # Loose SDK packages are unsigned. Do not install them in the runner OS.
-    "$apk" --allow-untrusted extract --destination "$work/apk-contents" "${meshd[0]}"
-    readelf -h "$work/apk-contents/usr/sbin/meshd" >"$work/meshd.elf"
-    grep -Eq 'Machine:[[:space:]]+AArch64$' "$work/meshd.elf" || fail 'meshd is not an AArch64 ELF'
-    grep -Fxq '/etc/config/meshd' "$work/apk-contents/lib/apk/packages/meshd.conffiles" || fail 'APK did not preserve meshd configuration'
-    python3 - "$work/meshd.json" <<'PY'
+    "$apk" --allow-untrusted extract --destination "$work/apk-contents" "${daemon_pkg[0]}"
+    readelf -h "$work/apk-contents/usr/sbin/wifiroam-dpi" >"$work/wifiroam-dpi.elf"
+    grep -Eq 'Machine:[[:space:]]+AArch64$' "$work/wifiroam-dpi.elf" || fail 'wifiroam-dpi is not an AArch64 ELF'
+    [[ -f $work/apk-contents/etc/config/wifiroam ]] || fail 'APK did not ship wifiroam configuration'
+    [[ -f $work/apk-contents/usr/share/wifiroam/wifiroamd.uc ]] || fail 'APK did not ship the wifiroamd ucode script'
+    python3 - "$work/wifiroam.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -206,7 +213,7 @@ deps = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))['info'].get('de
 print('Runtime dependencies (must already exist on the device): ' + ', '.join(deps))
 PY
 else
-    python3 - "${meshd[0]}" "${luci[0]}" <<'PY'
+    python3 - "${daemon_pkg[0]}" "${luci[0]}" <<'PY'
 import gzip
 import io
 import sys
@@ -238,10 +245,6 @@ for path in sys.argv[1:]:
 PY
 fi
 
-if [[ ${SDK_WIFI_TEST:-0} == 1 ]]; then
-    SDK="$sdk" bash "$repo/package/meshd/tests/run-wifi.sh"
-fi
-
-cp -- "${meshd[0]}" "${luci[0]}" "$output/"
-printf 'Built packages (%s):\n  %s\n  %s\n' "$profile" "$output/${meshd[0]##*/}" "$output/${luci[0]##*/}"
-(cd -- "$output" && sha256sum -- "${meshd[0]##*/}" "${luci[0]##*/}")
+cp -- "${daemon_pkg[0]}" "${luci[0]}" "$output/"
+printf 'Built packages (%s):\n  %s\n  %s\n' "$profile" "$output/${daemon_pkg[0]##*/}" "$output/${luci[0]##*/}"
+(cd -- "$output" && sha256sum -- "${daemon_pkg[0]##*/}" "${luci[0]##*/}")

@@ -1,8 +1,0 @@
-/etc/config/meshd
-/etc/meshd/identity/
-/etc/meshd/authorized
-/etc/meshd/profile.bin
-/etc/meshd/rejected
-/etc/meshd/transaction
-/etc/meshd/wireless.backup
-/etc/meshd/wireless.stage

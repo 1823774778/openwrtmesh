@@ -1,9 +1,0 @@
-#!/bin/sh
-# SPDX-License-Identifier: GPL-2.0-or-later
-# 首次安装只创建目录；私钥和信任根不允许复制自固件，也不生成默认信任。
-umask 077
-[ ! -L /etc/meshd ] && [ ! -L /etc/meshd/identity ] || exit 1
-mkdir -p /etc/meshd/identity || exit 1
-chown root:root /etc/meshd /etc/meshd/identity || exit 1
-chmod 0700 /etc/meshd /etc/meshd/identity || exit 1
-exit 0

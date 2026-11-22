@@ -21,17 +21,16 @@ jobs:
         shell: bash
         run: |
           bash -n scripts/build-sdk.sh
-          bash -n package/meshd/tests/run-wifi.sh
-          sh -n scripts/pki.sh
-          sh -n package/meshd/files/meshd.init
-          sh -n package/meshd/files/meshd.defaults
+          sh -n package/wifiroam/files/wifiroam.init
           shopt -s globstar
-          for js in luci-app-meshd/htdocs/**/*.js; do node --check "$js"; done
-          python3 -m json.tool luci-app-meshd/root/usr/share/luci/menu.d/luci-app-meshd.json >/dev/null
-          python3 -m json.tool luci-app-meshd/root/usr/share/rpcd/acl.d/luci-app-meshd.json >/dev/null
-      - run: python3 -m unittest discover -s tests -v
-      - run: make -C tests test
-      - run: node luci-app-meshd/tests/smoke.cjs
+          for js in luci-app-wifiroam/htdocs/**/*.js; do
+            { echo 'function __check(){'; cat "$js"; echo '}'; } > /tmp/wr-check.cjs
+            node --check /tmp/wr-check.cjs || exit 1
+          done
+          python3 -m json.tool luci-app-wifiroam/root/usr/share/luci/menu.d/luci-app-wifiroam.json >/dev/null
+          python3 -m json.tool luci-app-wifiroam/root/usr/share/rpcd/acl.d/luci-app-wifiroam.json >/dev/null
+      - name: Verify backend/frontend contract
+        run: python3 tests/test_contract.py
 
   sdk:
     name: ${{ matrix.name }}
@@ -45,17 +44,14 @@ jobs:
           - name: OpenWrt 24.10.5 x86/64 IPK
             profile: x86-64-ipk
             format: ipk
-            wifi_test: '1'
             artifact: openwrt-24.10.5-x86-64-ipk
           - name: OpenWrt 25.12.6 ARM64 Cortex-A53 APK
             profile: aarch64-cortex-a53-apk
             format: apk
-            wifi_test: '0'
             artifact: openwrt-25.12.6-aarch64-cortex-a53-apk
           - name: OpenWrt 24.10.5 ARM64 Cortex-A53 IPK
             profile: aarch64-cortex-a53-ipk
             format: ipk
-            wifi_test: '0'
             artifact: openwrt-24.10.5-aarch64-cortex-a53-ipk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -70,12 +66,11 @@ jobs:
       - name: Verify official SDK and build plugin packages
         env:
           SDK_PROFILE: ${{ matrix.profile }}
-          SDK_WIFI_TEST: ${{ matrix.wifi_test }}
-          SDK_OUTPUT_DIR: ${{ runner.temp }}/meshd-packages
+          SDK_OUTPUT_DIR: ${{ runner.temp }}/wifiroam-packages
         run: bash scripts/build-sdk.sh "$SDK_PROFILE"
       - name: Upload plugin packages (not firmware)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/meshd-packages/*.${{ matrix.format }}
+          path: ${{ runner.temp }}/wifiroam-packages/*.${{ matrix.format }}
           if-no-files-found: error

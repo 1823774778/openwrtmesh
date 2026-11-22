@@ -1,66 +1,78 @@
-# openwrtmesh · meshd 0.1
+# wifiroam · OpenWrt 无缝漫游组网
 
-基于《OpenWrt 全屋 Mesh 组网方案》和《meshd 全量提示词手册》的 **V1 试用版**。这是两个可以独立安装或集成到固件的 OpenWrt 软件包：C 守护进程 `meshd` 和 LuCI 插件 `luci-app-meshd`。插件默认关闭控制面，先部署现有回程，再启用组网管理。
+一套 **OpenWrt 原生的多 AP 无缝漫游（802.11k/v/r）管理方案**，由两个可独立安装的软件包组成：
+
+| 软件包 | 作用 | 架构 |
+|---|---|---|
+| `wifiroam` | ucode 守护进程 `wifiroamd` + NFQUEUE DPI 二进制 `wifiroam-dpi` | 目标架构（如 `aarch64_cortex-a53`） |
+| `luci-app-wifiroam` | LuCI Web 管理界面（深色卡片式 UI） | `all`（架构无关） |
+
+守护进程以 CAP（主路由）/ SAP（子 AP）角色运行：发现邻近设备、人工配对、聚合全网拓扑、跟踪终端，并从主路由统一下发漫游、访客网络、回程与应用管控配置。管理通过 ubus 对象 `wifiroam`（23 个方法）完成，LuCI 插件提供网络拓扑、客户端、无线设置和高级设置四个页面。
+
+本仓库构建并发布软件包成品，不含可刷固件镜像。
 
 ## 能做什么
 
-- 在指定 IPv4 管理接口发现候选设备。离线生成每台设备独立的证书，管理员按已核对的指纹授权；已授权节点用 mTLS 心跳连网关。LuCI 显示在线、可疑、离线和配置版本。
-- 从网关统一管理选定的 WPA2-Personal 客户端 AP 的 SSID、密码和 802.11k/v/r 开关。签名配置先在网关确认，再逐台下发给节点；每台设备做本地健康校验和失败回滚。密码不由 LuCI/RPC 回显。
-- 使用手工建好的有线桥接或可用的单跳 WDS 回程，提供诊断和事件记录。界面位于 **网络 → Mesh**。策略和升级页只显示当前不可用，不提供无效操作。
+- **网络拓扑**：自动绘制主路由 / 子 AP / 终端的连接关系，区分有线回程与无线链路，按信号强度着色；支持终端重命名、固定 AP、详情统计。
+- **无缝漫游**：集中配置 802.11k（邻居/信标）、802.11v（BTM）、802.11r（FT），可选简单/专家 FT 模式与 RSSI 阈值；下发前做 wpad/加密分组预检。
+- **无线与访客网络**：多频合一或分频 SSID/密码统一下发；访客网络支持限速、允许时段、隔离与开放网络。
+- **应用识别与管控**：基于 DPI（TLS/QUIC SNI）+ nftset 的按应用时长统计与允许/阻断策略。
+- **终端管理**：OUI/品牌识别、随机 MAC 归组、定时断网（ban）、固定 AP（pin）、WoL 唤醒。
+- **硬件卸载**：查看与切换 firewall flow offloading。
 
-**当前不是自动选路的多跳 Mesh 固件。** 不自动建网桥/VLAN、不自动切换回程；未实现 802.11s/batman-adv 自愈、主动漫游引导、整批回滚、访客/IoT/QoS 或 OTA。兼容性、漫游时延、路径恢复与资源指标待真机验收。分项范围见 [验收矩阵](<docs/validation.md>)。
+> 具体能力以真机为准。DPI/访客限速/硬件卸载依赖内核 NFQUEUE、nftables、`tc` 等能力，极简镜像下会降级。
 
 ## 获取 IPK / APK
 
-推送提交会触发 [GitHub Actions 构建](https://github.com/1823774778/openwrtmesh/actions/workflows/build.yml)，也可在该页点 **Run workflow**。从成功运行的 **Artifacts** 下载对应 ZIP；每份都含 `meshd` 和 `luci-app-meshd` 两个包。
+推送提交会触发 [GitHub Actions 构建](../../actions/workflows/build.yml)，也可在该页点 **Run workflow**。从成功运行的 **Artifacts** 下载对应 ZIP；每份都含 `wifiroam` 与 `luci-app-wifiroam` 两个包。
 
 | 固件与软件包架构 | 格式 | Actions 制品 |
 |---|---|---|
-| [OpenWrt 24.10.5 x86/64](https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/)，`x86_64` | IPK | `openwrt-24.10.5-x86-64-ipk` |
-| [OpenWrt 24.10.5 mediatek/filogic](https://downloads.openwrt.org/releases/24.10.5/targets/mediatek/filogic/)，`aarch64_cortex-a53` | IPK | `openwrt-24.10.5-aarch64-cortex-a53-ipk` |
-| [OpenWrt 25.12.6 mediatek/filogic](https://downloads.openwrt.org/releases/25.12.6/targets/mediatek/filogic/)，`aarch64_cortex-a53` | APK | `openwrt-25.12.6-aarch64-cortex-a53-apk` |
+| OpenWrt 24.10.5 x86/64，`x86_64` | IPK | `openwrt-24.10.5-x86-64-ipk` |
+| OpenWrt 25.12.6 mediatek/filogic，ARM64 Cortex-A53，`aarch64_cortex-a53` | APK | `openwrt-25.12.6-aarch64-cortex-a53-apk` |
+| OpenWrt 24.10.5 mediatek/filogic，ARM64 Cortex-A53，`aarch64_cortex-a53` | IPK | `openwrt-24.10.5-aarch64-cortex-a53-ipk` |
 
-先在路由器用 `cat /etc/openwrt_release` 核对固件版本，再用 `apk --print-arch` 或 `opkg print-architecture` 核对软件包架构。**CPU 名称相同不代表软件包 ABI 匹配**；不同版本、目标或 ABI 请使用对应 SDK，不要强制安装。
+先用 `cat /etc/openwrt_release` 核对固件版本，再用 `apk --print-arch` 或 `opkg print-architecture` 核对软件包架构。**CPU 名称相同不代表 ABI 匹配**；不同版本、目标或 ABI 请勿强制安装。
 
-包还绑定固件所用的库 ABI 名。安装报 `no such package` 时，先在设备上跑只读诊断，把输出贴到 Issue：
-
-```sh
-sh scripts/check-device.sh
-```
-
-| 制品 | 设备上必须已存在的库 |
-|---|---|
-| 24.10.5 IPK（x86_64 / `aarch64_cortex-a53`） | `libubox20240329`、`libubus20250102`、`libblobmsg-json20240329`、`libuci20250120`、`libmbedtls21` |
-| 25.12.6 APK（`aarch64_cortex-a53`） | `libubox20260213`、`libubus20251202`、`libblobmsg-json20260213`、`libuci20250120`、`libmbedtls21` |
-
-构建脚本会打印实际生成的依赖清单，以它为准。设备上的库名不同就说明固件版本不匹配：用该版本的 SDK 重编，或升级到对应官方固件；`--force-*` 只会让动态链接在启动时失败。
-
-在自有 Linux x86_64 构建机上也可复现（普通用户）：
+在 Linux x86_64 构建机上可复现（普通用户）：
 
 ```sh
-# Debian / Ubuntu 的 SDK 宿主依赖
-sudo apt-get install build-essential binutils curl file gawk gettext git libncurses-dev \
-    patch perl pkgconf python3 rsync unzip wget zlib1g-dev zstd
 SDK_OUTPUT_DIR="$PWD/dist/ipk" bash scripts/build-sdk.sh x86-64-ipk
 SDK_OUTPUT_DIR="$PWD/dist/apk" bash scripts/build-sdk.sh aarch64-cortex-a53-apk
 ```
 
-两种目标都在 Linux x86_64 构建机上交叉构建，无需 ARM 主机。[构建脚本](<scripts/build-sdk.sh>) 校验官方 SDK SHA-256，并固定官方 feeds 的提交；[CI](<.github/workflows/build.yml>) 分别编译和上传对应的两个包，不输出可刷固件。
+构建脚本校验官方 SDK 的 SHA-256，并固定官方 base/packages/luci feed 的提交；先编译 `libmnl` / `libnfnetlink` / `libnetfilter-queue` 到 staging_dir，再编译两个软件包。CI 分别编译并上传对应产物。
 
-其他目标的通用集成方式：在**相同固件版本与目标**的官方 SDK/源码树中，把 `package/meshd` 和 `luci-app-meshd` 两个包目录分别放到 `package/meshd`、`package/luci-app-meshd`。按目标版本配置官方 feeds，安装 `libubox`、`libubus`、`libuci`、`libblobmsg-json`、`libmbedtls`、`luci-base` 对应配方；选择 `CONFIG_PACKAGE_meshd=m` 和 `CONFIG_PACKAGE_luci-app-meshd=m` 后执行：
+## 安装
 
 ```sh
-make defconfig
-make -j"$(nproc)" package/meshd/compile
-make -j"$(nproc)" package/luci-app-meshd/compile
+opkg install wifiroam_*.ipk luci-app-wifiroam_*.ipk                    # IPK
+# 或
+apk add --allow-untrusted wifiroam-*.apk luci-app-wifiroam-*.apk       # APK
 ```
 
-若集成到完整固件，改用 `=y`，再按具体设备选择完整 wpad（如 `wpad-mbedtls` 或 `wpad-openssl`）与 HTTPS LuCI。插件不需要 Node.js/Python 在设备上运行。`ip-full`、`tc`、`nftables`、`batman-adv` 按固件的实际网络方案选择，并非本版核心依赖。不要在镜像内预置生产 CA 私钥、节点私钥或 Wi‑Fi 密码。
+安装后访问 LuCI 的 **网络 → Network Management**。首次进入为 `unconfigured` 角色：
 
-## 安装和使用
+1. 在「无线设置」把本机设为 **主路由（CAP）**，设置配对口令。
+2. 在其他 AP 上设为子路由，或在主路由「发现的设备」里按 MAC 配对。
+3. 配对完成后到「网络拓扑」确认节点在线，再到「高级设置」配置漫游参数。
 
-按 [部署手册](<docs/deploy.md>) 配好管理网络和客户端 AP、匹配软件包、生成设备证书、核对指纹并启用。建议从一台网关和一台有线节点开始，全程保留有线维护。无线发布会重载 AP；不要在只有 Wi‑Fi 的维护会话里首次试用。
+默认配置不含任何口令或密钥。守护进程在启用前不会下发配置；无线相关写入会重载网络并可能短暂中断 Wi-Fi，请保留有线维护通道。
 
-- [协议和 ubus API](<docs/protocol.md>)：参数、返回值、线上帧与事务边界。
-- [验收矩阵](<docs/validation.md>)：自动测试覆盖、真机用例、未实现项目。
-- [许可证](<LICENSE>)：GPL-2.0-or-later。
+## 依赖
+
+`wifiroam` 运行时依赖官方 feed 中的：`ucode` 及 `ucode-mod-{ubus,uloop,socket,fs,uci,digest}`、`libnetfilter-queue`、`libmnl`、`libnfnetlink`。部分功能还需要系统具备 `nft`、`ip`、`iw`、`tc`、完整版 `wpad`（非 basic）、dnsmasq 与内核 NFQUEUE 支持。
+
+## 仓库结构
+
+```
+package/wifiroam/           ucode 守护进程 + DPI 源码 + init/config
+luci-app-wifiroam/          LuCI 前端（4 页面 + 深色主题 CSS + zh_Hans 翻译）
+scripts/build-sdk.sh        固定版本的 SDK 交叉构建与产物校验
+tests/test_contract.py      后端/前端/ACL/菜单一致性离线校验
+.github/workflows/build.yml 静态检查 + 三目标构建矩阵
+```
+
+## 许可证
+
+GPL-2.0-or-later，见 [LICENSE](LICENSE)。

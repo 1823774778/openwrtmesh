@@ -1,65 +1,88 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Keep the package, JavaScript and rpcd contracts in sync without a router."""
+"""Keep the wifiroam backend, LuCI frontend and rpcd contracts in sync without a router."""
 import json
 import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "package/meshd/src"
-LUCI = ROOT / "luci-app-meshd"
-RO = {
-    "status", "topology", "link_quality", "client_list", "roam_config",
-    "config_status", "diagnose", "upgrade_status", "event_log",
+UC = ROOT / "package/wifiroam/files/wifiroamd.uc"
+LUCI = ROOT / "luci-app-wifiroam"
+MENU = LUCI / "root/usr/share/luci/menu.d/luci-app-wifiroam.json"
+ACL = LUCI / "root/usr/share/rpcd/acl.d/luci-app-wifiroam.json"
+VIEW_ROOT = LUCI / "htdocs/luci-static/resources/view"
+VIEWS = VIEW_ROOT / "wifiroam"
+COMMON = LUCI / "htdocs/luci-static/resources/wifiroam/common.js"
+
+# The 23 methods published by wifiroamd.uc api_obj (3411-4022) and granted by ACL.
+READ = {
+    "status", "topology", "client_detail", "get_roam", "precheck", "discover",
+    "roam_log", "get_backhaul", "appctl_status", "offload_status", "get_wifi", "get_guest",
 }
-RW = {"enroll", "remove_node", "config_apply", "config_rollback"}
-DEFERRED = {
-    "set_role", "set_roam", "set_backhaul", "set_guest", "set_qos", "set_parental",
-    "upgrade_node", "optimize_topology",
+WRITE = {
+    "set_alias", "set_role", "set_roam", "set_backhaul", "pair", "unpair",
+    "set_appctl", "set_app_policy", "set_offload", "set_wifi", "set_guest",
 }
+ALL_METHODS = READ | WRITE
 
 
 class ContractTests(unittest.TestCase):
-    def test_ubus_implementation_and_limited_acl(self):
-        rpc = (SRC / "rpc.c").read_text(encoding="utf-8")
-        methods = re.findall(r'UBUS_METHOD(?:_NOARG)?\("(\w+)",\s*(\w+)', rpc)
-        self.assertEqual(len(methods), 21)
-        self.assertEqual({name for name, _ in methods}, RO | RW | DEFERRED)
-        self.assertEqual({name for name, handler in methods if handler == "unsupported"}, DEFERRED)
-        acl = json.loads((LUCI / "root/usr/share/rpcd/acl.d/luci-app-meshd.json").read_text())
-        self.assertEqual(set(acl), {"luci-app-meshd"})
-        for scope, expected in {"read": RO, "write": RW}.items():
-            self.assertEqual(acl["luci-app-meshd"][scope], {"ubus": {"meshd": acl["luci-app-meshd"][scope]["ubus"]["meshd"]}})
-            allowed = acl["luci-app-meshd"][scope]["ubus"]["meshd"]
-            self.assertEqual(len(allowed), len(expected))
-            self.assertEqual(set(allowed), expected)
+    def test_backend_publishes_every_method(self):
+        src = UC.read_text(encoding="utf-8")
+        for method in ALL_METHODS:
+            with self.subTest(method=method):
+                self.assertRegex(src, rf'\b{re.escape(method)}\s*:\s*\{{')
+        self.assertIn('publish("wifiroam"', src)
 
-    def test_menu_resolves_to_six_views(self):
-        menu = json.loads((LUCI / "root/usr/share/luci/menu.d/luci-app-meshd.json").read_text())
-        parent = menu["admin/network/mesh"]
-        self.assertIn("luci-app-meshd", parent["depends"]["acl"])
-        views = {entry["action"]["path"] for entry in menu.values() if entry["action"]["type"] == "view"}
-        self.assertEqual(len(views), 6)
+    def test_acl_matches_backend_methods(self):
+        acl = json.loads(ACL.read_text(encoding="utf-8"))
+        self.assertEqual(set(acl), {"luci-app-wifiroam"})
+        entry = acl["luci-app-wifiroam"]
+        self.assertEqual(set(entry["read"]["ubus"]["wifiroam"]), READ)
+        self.assertEqual(set(entry["write"]["ubus"]["wifiroam"]), WRITE)
+        self.assertEqual(len(entry["read"]["ubus"]["wifiroam"]), len(READ))
+        self.assertEqual(len(entry["write"]["ubus"]["wifiroam"]), len(WRITE))
+
+    def test_menu_resolves_to_four_views(self):
+        menu = json.loads(MENU.read_text(encoding="utf-8"))
+        parent = menu["admin/wifiroam"]
+        self.assertIn("luci-app-wifiroam", parent["depends"]["acl"])
+        views = {e["action"]["path"] for e in menu.values() if e["action"]["type"] == "view"}
+        self.assertEqual(len(views), 4)
         for view in views:
             with self.subTest(view=view):
-                path = LUCI / "htdocs/luci-static/resources/view" / f"{view}.js"
-                self.assertTrue(path.is_file())
+                self.assertTrue((VIEW_ROOT / f"{view}.js").is_file())
 
-    def test_disabled_default_does_not_ship_credentials(self):
-        cfg = (ROOT / "package/meshd/files/meshd.config").read_text()
-        core = cfg.split("config mesh 'roam'", 1)[0]
-        self.assertIn("option enabled '0'", core)
-        self.assertIn("option role 'candidate'", core)
-        self.assertIn("option mtls '1'", cfg)
-        self.assertIn("option allow_wps '0'", cfg)
+    def test_frontend_only_calls_known_methods(self):
+        """Every object:'wifiroam' method used by the UI must exist in the backend."""
+        called = set()
+        for js in VIEWS.glob("*.js"):
+            text = js.read_text(encoding="utf-8")
+            # wr.call('method' / wr.safeCall('method'
+            called |= set(re.findall(r'wr\.(?:safeCall|call)\(\s*[\'"]([\w]+)[\'"]', text))
+        common = COMMON.read_text(encoding="utf-8")
+        called |= set(re.findall(r'wr\.(?:safeCall|call)\(\s*[\'"]([\w]+)[\'"]', common))
+        self.assertTrue(called)
+        unknown = called - ALL_METHODS
+        self.assertEqual(unknown, set(), f"frontend calls methods absent in backend: {sorted(unknown)}")
+
+    def test_version_is_synchronised(self):
+        src = UC.read_text(encoding="utf-8")
+        m = re.search(r'DAEMON_VERSION\s*=\s*(\d+)', src)
+        self.assertIsNotNone(m, "DAEMON_VERSION missing in backend")
+        version = m.group(1)
+        for js in VIEWS.glob("*.js"):
+            text = js.read_text(encoding="utf-8")
+            if "REQUIRED_VERSION" in text:
+                req = re.search(r'REQUIRED_VERSION\s*=\s*(\d+)', text)
+                self.assertIsNotNone(req)
+                self.assertEqual(req.group(1), version, f"version mismatch in {js.name}")
+
+    def test_default_config_has_no_credentials_and_start_disabled_pairing(self):
+        cfg = (ROOT / "package/wifiroam/files/wifiroam.config").read_text(encoding="utf-8")
+        self.assertIn("option role 'unconfigured'", cfg)
+        self.assertIn("option token ''", cfg)
         self.assertNotIn("PRIVATE KEY", cfg)
-        self.assertNotIn("BEGIN CERTIFICATE", cfg)
-
-    def test_no_shell_and_no_password_reply(self):
-        for source in SRC.glob("*.c"):
-            self.assertNotRegex(source.read_text(encoding="utf-8"), r'\b(?:system|popen)\s*\(')
-        rpc = (SRC / "rpc.c").read_text(encoding="utf-8")
-        self.assertNotRegex(rpc, r'blobmsg_add_string\([^;]*"(?:key|password|psk)"')
 
 
 if __name__ == "__main__":
